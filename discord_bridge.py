@@ -26,6 +26,11 @@ INTERVAL_WINDOW_SEC = 30  # how far back to retain speaking intervals
 # much covered by another user's is skipped rather than captioned twice;
 # its audio is already in the other user's segment.
 OVERLAP_SKIP_FRAC = 0.8
+# An interval running longer than this can't cause that skip: it's more
+# likely an open mic held "speaking" by background noise than one long
+# sentence, and letting it cover everyone else would caption the whole
+# call under that one person's name.
+COVER_MAX_SEC = 20.0
 
 _lock = threading.Lock()
 _names: dict = {}
@@ -104,6 +109,8 @@ def _covering_user_locked(iv):
         return None
     for other in _intervals:
         if other["user_id"] == iv["user_id"] or other.get("covered_by"):
+            continue
+        if (other["end"] if other["end"] is not None else time.time()) - other["start"] > COVER_MAX_SEC:
             continue
         other_end = other["end"] if other["end"] is not None else iv["end"]
         overlap = min(iv["end"], other_end) - max(iv["start"], other["start"])
@@ -205,6 +212,37 @@ def open_intervals():
     with _lock:
         return [(iv["user_id"], _names.get(iv["user_id"], f"User_{iv['user_id']}"), iv["start"])
                 for iv in _intervals if iv["end"] is None]
+
+
+def others_speaking_fraction(user_id, start, end, started_after=None):
+    """How much of [start, end] other users were speaking for (0-1),
+    counting intervals still open and closed ones that were captioned (not
+    skipped as covered) - only those starting after started_after, if
+    given. Overlapping intervals are summed, then capped at 1 - a rough
+    measure, used to tell whether a stretch of the mixed audio is mostly
+    someone else's speech."""
+    if end <= start:
+        return 0.0
+    with _lock:
+        now = time.time()
+        total = 0.0
+        for iv in _intervals:
+            if iv["user_id"] == user_id or iv.get("covered_by"):
+                continue
+            if started_after is not None and iv["start"] <= started_after:
+                continue
+            iv_end = iv["end"] if iv["end"] is not None else now
+            total += max(0.0, min(end, iv_end) - max(start, iv["start"]))
+    return min(1.0, total / (end - start))
+
+
+def first_reply_start(user_id, after, before):
+    """When the earliest other user (still speaking, or captioned rather
+    than skipped) started speaking in (after, before), or None."""
+    with _lock:
+        starts = [iv["start"] for iv in _intervals
+                  if iv["user_id"] != user_id and not iv.get("covered_by") and after < iv["start"] < before]
+    return min(starts) if starts else None
 
 
 def is_active() -> bool:

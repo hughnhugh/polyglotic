@@ -8,13 +8,17 @@ separate environment and is reached over localhost instead.
 
     venv-qwen-asr\\Scripts\\python.exe qwen_asr_server.py MODEL_DIR PORT
 
-POST /transcribe  body: little-endian float32 PCM, 16kHz mono
+POST /transcribe[?language=Vietnamese&context=...]
+                  body: little-endian float32 PCM, 16kHz mono
                   -> {"language": "Chinese", "text": "..."}
+                  language forces one instead of detecting; context is
+                  text (names, slang) the model biases its spelling toward
 GET  /health      -> 200 once the model is loaded
 """
 
 import json
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import numpy as np
@@ -43,12 +47,15 @@ def main():
             self._reply(200 if self.path == "/health" else 404, {"status": "ok"})
 
         def do_POST(self):
-            if self.path != "/transcribe":
+            url = urllib.parse.urlsplit(self.path)
+            if url.path != "/transcribe":
                 self._reply(404, {"error": "not found"})
                 return
+            params = dict(urllib.parse.parse_qsl(url.query))
             audio = np.frombuffer(self.rfile.read(int(self.headers["Content-Length"])), dtype="<f4")
             try:
-                result = model.transcribe(audio=(audio, SAMPLE_RATE), language=None)[0]
+                result = model.transcribe(audio=(audio, SAMPLE_RATE), language=params.get("language"),
+                                          context=params.get("context", ""))[0]
                 self._reply(200, {"language": result.language or "", "text": result.text or ""})
             except Exception as e:
                 self._reply(500, {"error": f"{type(e).__name__}: {e}"})

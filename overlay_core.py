@@ -7,6 +7,7 @@ tray icon, and one overlay window per active target - windows can be
 opened/closed live as targets are added/removed from Settings.
 """
 
+import itertools
 import os
 import queue
 import sys
@@ -23,6 +24,7 @@ import torch
 from faster_whisper import WhisperModel
 
 import discord_bridge
+import settings
 import tray
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
@@ -54,6 +56,25 @@ BRIDGE_FINAL_MAX_SEC = 20.0
 # the first interval's start) is transcribed again and that one caption
 # replaces their previous one - one sentence, not three fragments.
 BRIDGE_JOIN_GAP_SEC = 2.0
+# A live piece (or the tail of an interval too long to redo) at least this
+# much covered by the speaking of others who started after this speaker did
+# is skipped - in the mixed loopback audio it's mostly their speech, e.g.
+# while someone's open mic keeps them "speaking" through everyone else's
+# conversation. Only later starters count, so of two people flagged over
+# the same speech (an echo) one still gets live captions.
+LIVE_OTHERS_SKIP_FRAC = 0.5
+# Someone replying just before the speaker's interval closes: their opening
+# words are in the mixed audio at its end (Discord also holds "speaking" a
+# moment past the last word). A final caption's audio stops this long after
+# the reply started, if the reply started within REPLY_TRIM_WINDOW_SEC of
+# the end - so it isn't captioned under the wrong name, twice.
+REPLY_TRIM_WINDOW_SEC = 1.5
+REPLY_TRIM_KEEP_SEC = 0.3
+
+# The speech model's conversation language (None = auto-detect) and
+# context words, set live from Settings (see settings.CONVERSATION_LANGUAGES)
+# and read by process_segment for every segment.
+speech_options = {"language": None, "context": ""}
 
 MAX_HISTORY = 300                # cap on stored caption entries so the log doesn't grow unbounded
 
@@ -177,6 +198,8 @@ class ModelHolder:
             with self._lock:
                 self._model = new_model
                 self.size = loaded_size
+            if loaded_size == new_size:
+                settings.update(model=new_size)
             status.set("whisper_model", f"Ready ({loaded_size})")
             broadcast(f"Model reloaded ({loaded_size}).")
 
@@ -421,11 +444,49 @@ def _slice_timestamped_buffer(buffer, start_ts, end_ts):
 # (user_id, start): {"group": caption group id, "next_cut": ts}. Only
 # touched from the loopback capture thread.
 _live_intervals: dict = {}
-# The latest captioned run of back-to-back intervals per user, as
-# {"group", "start", "end"} - see BRIDGE_JOIN_GAP_SEC. Only the most
-# recently captioned user's run can still be joined onto.
+# The latest captioned run of back-to-back speech per source - a Discord
+# user id, or "mic"/"loopback" for VAD-cut audio - as {"group", "start",
+# "end"}; see BRIDGE_JOIN_GAP_SEC. Only the most recently captioned
+# source's run can still be joined onto. Shared by the loopback and mic
+# capture threads.
 _runs: dict = {}
-_live_group_seq = 0
+_runs_lock = threading.Lock()
+_caption_group_ids = itertools.count(1)
+
+
+def _new_caption_group():
+    return f"g{next(_caption_group_ids)}"
+
+
+def _plan_final(key, start, end, live_group, last_cut, may_join=lambda run_end: True):
+    """Where a finished stretch of speech by `key` (from `start` to `end`,
+    with live captions in `live_group` cut up to `last_cut`, if any) should
+    be transcribed from, and which caption group its final caption takes:
+    -> (slice_start, group, absorb). Joins it onto the same source's
+    previous caption if that ended within BRIDGE_JOIN_GAP_SEC and
+    may_join(previous_end) agrees; otherwise the whole stretch, or just
+    what's after the last live cut if it's longer than BRIDGE_FINAL_MAX_SEC."""
+    with _runs_lock:
+        run = _runs.get(key)
+    if (run and start - run["end"] <= BRIDGE_JOIN_GAP_SEC and end - run["start"] <= BRIDGE_FINAL_MAX_SEC
+            and may_join(run["end"])):
+        # Same source again right after its last caption - redo the whole
+        # run as one caption replacing it (and this stretch's live
+        # captions, if it had any).
+        return run["start"], run["group"], [live_group] if live_group else []
+    if end - start <= BRIDGE_FINAL_MAX_SEC:
+        return start, live_group or _new_caption_group(), []  # whole stretch, replacing any live captions
+    # Too long to redo - live captions stay, the rest is added.
+    return (last_cut if last_cut else end - BRIDGE_FINAL_MAX_SEC), _new_caption_group(), []
+
+
+def _commit_run(key, group, start, end):
+    """Records a final caption about to be submitted - and that someone
+    else's caption now sits after every other source's last one, so their
+    runs can't be joined onto any more."""
+    with _runs_lock:
+        _runs.clear()
+        _runs[key] = {"group": group, "start": start, "end": end}
 
 
 def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_segment_fn):
@@ -445,62 +506,54 @@ def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_
         next_cut = live["next_cut"] if live else start
         if now - next_cut < MAX_SEGMENT_SEC:
             continue
-        segment = _slice_timestamped_buffer(timestamped_buffer, next_cut, now)
         if live is None:
             live = _live_intervals[(user_id, start)] = {"group": _new_caption_group()}
         live["next_cut"] = now
+        if discord_bridge.others_speaking_fraction(user_id, next_cut, now, started_after=start) >= LIVE_OTHERS_SKIP_FRAC:
+            continue  # mostly someone else's speech in the mix
+        segment = _slice_timestamped_buffer(timestamped_buffer, next_cut, now)
         if segment is not None:
             executor.submit(process_segment_fn, model_holder.get(), segment, "", (user_id, username),
-                            caption_group=live["group"], final=False)
+                            caption_group=live["group"], final=False, speech_end=now)
 
     for closed in discord_bridge.drain_closed_intervals():
         live = _live_intervals.pop((closed["user_id"], closed["start"]), None)
-        group = live["group"] if live else None
-        speaker_hint = (closed["user_id"], closed["username"])
+        live_group = live["group"] if live else None
+        user_id = closed["user_id"]
+        speaker_hint = (user_id, closed["username"])
         duration = closed["end"] - closed["start"]
         if closed.get("covered_by"):
             # Same mixed audio as another user's segment - see
             # discord_bridge.OVERLAP_SKIP_FRAC.
             print(f"[debug] skipped {closed['username']}'s {duration:.1f}s interval - "
                   f"overlaps {closed['covered_by']}'s")
-            if group:  # take back any live captions it already got
+            if live_group:  # take back any live captions it already got
                 executor.submit(process_segment_fn, model_holder.get(), None, "", speaker_hint,
-                                caption_group=group, final=True, absorb=[])
+                                caption_group=live_group, final=True)
             continue
         if duration < MIN_SPEECH_SEC:
             continue
 
-        user_id = closed["user_id"]
-        run = _runs.get(user_id)
-        absorb = []
-        if (run and closed["start"] - run["end"] <= BRIDGE_JOIN_GAP_SEC
-                and closed["end"] - run["start"] <= BRIDGE_FINAL_MAX_SEC):
-            # Same person again right after their last caption - redo the
-            # whole run as one caption replacing it (and this interval's
-            # live captions, if it had any).
-            start, absorb, group = run["start"], [group] if group else [], run["group"]
-        elif duration <= BRIDGE_FINAL_MAX_SEC:
-            start = closed["start"]  # whole interval, replacing any live captions
-        else:
-            # Too long to redo - live captions stay, the rest is added.
-            start = live["next_cut"] if live else closed["end"] - BRIDGE_FINAL_MAX_SEC
-            group = None
-        group = group or _new_caption_group()
-        segment = _slice_timestamped_buffer(timestamped_buffer, start, closed["end"])
+        start, group, absorb = _plan_final(
+            user_id, closed["start"], closed["end"], live_group, live["next_cut"] if live else None,
+            # Not across a gap someone else spoke in - the joined audio
+            # would take in the start of their reply.
+            may_join=lambda run_end: discord_bridge.others_speaking_fraction(user_id, run_end, closed["start"]) == 0,
+        )
+        if (duration > BRIDGE_FINAL_MAX_SEC and group != live_group and not absorb and
+                discord_bridge.others_speaking_fraction(user_id, start, closed["end"], started_after=closed["start"])
+                >= LIVE_OTHERS_SKIP_FRAC):
+            continue  # the tail of an overlong interval, mostly others' speech
+        end = closed["end"]
+        reply = discord_bridge.first_reply_start(user_id, max(closed["start"], end - REPLY_TRIM_WINDOW_SEC), end)
+        if reply is not None:
+            end = reply + REPLY_TRIM_KEEP_SEC
+        segment = _slice_timestamped_buffer(timestamped_buffer, start, end)
         if segment is None or len(segment) < int(MIN_SPEECH_SEC * VAD_SAMPLE_RATE):
             continue
-        # Someone else's caption now sits after this one - their runs can't
-        # be joined onto any more.
-        _runs.clear()
-        _runs[user_id] = {"group": group, "start": start, "end": closed["end"]}
+        _commit_run(user_id, group, start, closed["end"])
         executor.submit(process_segment_fn, model_holder.get(), segment, "", speaker_hint,
-                        caption_group=group, final=True, absorb=absorb)
-
-
-def _new_caption_group():
-    global _live_group_seq
-    _live_group_seq += 1
-    return f"g{_live_group_seq}"
+                        caption_group=group, final=True, absorb=absorb, speech_end=closed["end"])
 
 
 def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, model_holder, executor,
@@ -511,11 +564,19 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
     silence_frames = 0
     silence_frames_needed = int(SILENCE_HANGOVER_SEC * VAD_SAMPLE_RATE / FRAME_SAMPLES)
     min_speech_frames = int(MIN_SPEECH_SEC * VAD_SAMPLE_RATE / FRAME_SAMPLES)
+    frame_sec = FRAME_SAMPLES / VAD_SAMPLE_RATE
 
     is_loopback = source_tag == ""
-    timestamped_buffer: "deque" = deque() if is_loopback else None
+    run_key = "loopback" if is_loopback else source_tag
+    # Recent audio by capture time, for both sources: the Discord bridge
+    # slices its intervals out of loopback's, and VAD-cut speech re-slices
+    # a whole utterance (or a joined run of them) for its final caption.
+    timestamped_buffer: "deque" = deque()
     bridge_was_connected = False  # only meaningful when is_loopback
     last_bridge_status_text = None
+    # The current VAD utterance: when it started, its live captions' group
+    # (once one's been cut at MAX_SEGMENT_SEC) and when that last cut was.
+    utt_start = utt_group = utt_last_cut = None
 
     while not stop_event.is_set():
         try:
@@ -529,12 +590,12 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
 
         pcm_16k = resample_linear(pcm, native_rate, VAD_SAMPLE_RATE)
 
-        if is_loopback:
-            timestamped_buffer.append((chunk_ts, pcm_16k))
-            cutoff = chunk_ts - BRIDGE_BUFFER_WINDOW_SEC
-            while timestamped_buffer and timestamped_buffer[0][0] < cutoff:
-                timestamped_buffer.popleft()
+        timestamped_buffer.append((chunk_ts, pcm_16k))
+        cutoff = chunk_ts - BRIDGE_BUFFER_WINDOW_SEC
+        while timestamped_buffer and timestamped_buffer[0][0] < cutoff:
+            timestamped_buffer.popleft()
 
+        if is_loopback:
             connected = discord_bridge.is_connected()
             bridge_active = discord_bridge.is_active()
 
@@ -565,6 +626,9 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
             bridge_active = False
 
         buf = np.concatenate([leftover, pcm_16k])
+        # Capture time at the end of buf - frame i ends (len(buf) - (i+1)
+        # frames) earlier. Chunk-level precision, like the bridge slicing.
+        buf_end_ts = chunk_ts + len(pcm_16k) / VAD_SAMPLE_RATE
 
         n_frames = len(buf) // FRAME_SAMPLES
         usable = n_frames * FRAME_SAMPLES
@@ -572,9 +636,12 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
 
         for i in range(n_frames):
             frame = buf[i * FRAME_SAMPLES : (i + 1) * FRAME_SAMPLES]
+            frame_end = buf_end_ts - (len(buf) - (i + 1) * FRAME_SAMPLES) / VAD_SAMPLE_RATE
             prob = vad_model(torch.from_numpy(frame), VAD_SAMPLE_RATE).item()
 
             if prob >= SPEECH_THRESHOLD:
+                if not in_speech and utt_start is None:
+                    utt_start = frame_end - frame_sec
                 speech_buffer.append(frame)
                 silence_frames = 0
                 in_speech = True
@@ -584,7 +651,7 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
 
             if in_speech:
                 total_frames = len(speech_buffer)
-                duration_sec = total_frames * FRAME_SAMPLES / VAD_SAMPLE_RATE
+                duration_sec = total_frames * frame_sec
                 hit_silence_end = silence_frames >= silence_frames_needed
                 hit_max_duration = duration_sec >= MAX_SEGMENT_SEC
                 if hit_silence_end or hit_max_duration:
@@ -594,9 +661,28 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
                     # glitch-free fallback the moment the bridge drops, but
                     # don't double-emit the same audio through both paths
                     self_captioning_off = source_tag == "mic" and self_caption_state is not None and not self_caption_state.enabled
-                    if total_frames - silence_frames >= min_speech_frames and not bridge_active and not self_captioning_off:
-                        segment = np.concatenate(speech_buffer)
-                        executor.submit(process_segment_fn, model_holder.get(), segment, source_tag)
+                    emit = not bridge_active and not self_captioning_off
+                    if hit_silence_end:
+                        # Same live -> final -> join treatment as Discord
+                        # intervals: the whole utterance (or the run it
+                        # joins) again, replacing its live captions.
+                        speech_end = frame_end - silence_frames * frame_sec
+                        enough = utt_group is not None or total_frames - silence_frames >= min_speech_frames
+                        if emit and enough and utt_start is not None:
+                            start, group, absorb = _plan_final(run_key, utt_start, speech_end, utt_group, utt_last_cut)
+                            segment = _slice_timestamped_buffer(timestamped_buffer, start, speech_end)
+                            if segment is not None:
+                                _commit_run(run_key, group, start, speech_end)
+                                executor.submit(process_segment_fn, model_holder.get(), segment, source_tag,
+                                                caption_group=group, final=True, absorb=absorb, speech_end=speech_end)
+                        utt_start = utt_group = utt_last_cut = None
+                    elif emit:
+                        # Still talking at MAX_SEGMENT_SEC - a live caption
+                        # of the piece so far, replaced once they pause.
+                        utt_group = utt_group or _new_caption_group()
+                        utt_last_cut = frame_end
+                        executor.submit(process_segment_fn, model_holder.get(), np.concatenate(speech_buffer),
+                                        source_tag, caption_group=utt_group, final=False, speech_end=frame_end)
                     speech_buffer = []
                     silence_frames = 0
                     # a forced max-duration cut doesn't mean silence started -
@@ -848,6 +934,12 @@ class OverlayApp:
                 break
 
         if new_items:
+            shown_at = time.time()
+            for item in new_items:
+                if isinstance(item, dict) and item.get("speech_end") is not None:
+                    # Delay from the end of the speech to this caption
+                    # appearing - queueing and processing included.
+                    item["meta"] = f"[{item['lang']}, {shown_at - item['speech_end']:.1f}s]"
             if self.log_file:
                 for item in new_items:
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -966,6 +1058,8 @@ class OverlayApp:
             # Live pieces and the final caption replacing them are all
             # logged; the tag ties them together.
             parts.append(f"({'final' if item.get('final') else 'live'} {item['group']})")
+        if item.get("proc") is not None:
+            parts.append(f"(proc {item['proc']:.1f}s)")  # transcription + translation alone
         text = " ".join(parts) + " " + item["native"]
         if item.get("translated"):
             text += f"\n    -> {item['translated']}"
@@ -1066,6 +1160,7 @@ def run_translator(make_process_segment_fn, initial_targets, model_size="large-v
         translation_enabled.pop(target, None)
         _relayout_windows()
         _refresh_broadcast_targets()
+        settings.update(targets=list(targets))
         sw = settings_window_ref["window"]
         if sw is not None:
             sw.mark_target_unchecked(target)
@@ -1093,6 +1188,7 @@ def run_translator(make_process_segment_fn, initial_targets, model_size="large-v
         windows[target] = overlay_app
         _relayout_windows()
         _refresh_broadcast_targets()
+        settings.update(targets=list(targets))
 
     def remove_window(target):
         win = windows.get(target)
@@ -1102,6 +1198,7 @@ def run_translator(make_process_segment_fn, initial_targets, model_size="large-v
     def set_position(pos):
         position_override["value"] = pos
         _relayout_windows()
+        settings.update(position=pos)
 
     def set_bridge_port(new_port):
         # discord_bridge.stop() joins its server thread (up to a few seconds) -
@@ -1111,6 +1208,7 @@ def run_translator(make_process_segment_fn, initial_targets, model_size="large-v
             discord_bridge.start(port=new_port)
             status.set("discord_bridge", f"Listening on port {new_port} (no client - VAD fallback)")
         threading.Thread(target=_apply, daemon=True).start()
+        settings.update(bridge_port=new_port)
 
     tray_icon = {"icon": None}
 

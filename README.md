@@ -88,9 +88,23 @@ PyTorch-only number that misses Whisper's usage entirely.
 This is a persistent app, not a one-shot script: a **Settings window** is
 always available - a normal, taskbar-visible window (alt-tabbable like any
 other app) where you pick target languages (by name, e.g. "Vietnamese", not
-code), speech model, overlay position, mic capture, and the Discord
-bridge port, all editable live while it keeps running - checking/unchecking
-a language opens/closes its overlay immediately, no restart needed.
+code), speech model, conversation language, names & slang, overlay
+position, mic capture, and the Discord bridge port, all editable live while
+it keeps running - checking/unchecking a language opens/closes its overlay
+immediately, no restart needed. All of it is remembered in `settings.json`
+for the next launch, so a plain `translate_vc.py` comes back the way you
+left it; command-line options override it for that run.
+
+- **Conversation language** - "Auto-detect" (default), or English,
+  Mandarin, Cantonese or Vietnamese only. Forcing one skips the speech
+  model's language detection, so short or mumbled speech can't be misread
+  as some other language (Thai, Malay...). Use it for calls that are
+  entirely in one language: anything said in another language is still
+  written down, but labeled as the forced one - so it isn't translated in
+  that language's own window.
+- **Names & slang** - comma-separated words the speech model should spell
+  the way you wrote them (people's names, game terms, "HSK", "bún bò"...).
+  Applied from the next caption.
 
 The Settings window always starts visible right now (whether or not you
 pass `--target`) - it's meant to stay hidden for scripted `--target`
@@ -117,18 +131,28 @@ your mic in Discord itself. Have Discord (or whatever app) playing audio
 through your default output device — your microphone is captured too,
 tagged `[You]`, unless toggled off.
 
+**How captions update:** while someone keeps talking, a live caption
+(marked `…`) appears every 6 seconds; when they pause, the whole stretch
+(up to 20s) is transcribed again in one go and replaces those live pieces
+in place. If the same person carries on within 2 seconds, with nobody else
+captioned in between, their new speech is joined onto the previous caption
+and the whole run re-transcribed and re-translated as one. The time in each
+caption's `[lang, 1.2s]` tag is the delay from the end of the speech to the
+caption appearing - waiting and processing included (the log files also
+record processing time alone as `proc`).
+
 ### Options
 
 - `--target LANG[,LANG...]` - one or more comma-separated target language
-  codes to start captioning immediately (default: none - starts with
-  Settings open instead). 38 target languages - the ones Hy-MT2 supports
+  codes to start captioning immediately (default: the last run's, or `en`). 38 target languages - the ones Hy-MT2 supports
   (see `lang_codes.py`), including `zh` (Simplified Chinese), `zh-hant`
   (Traditional Chinese) and `yue` (Cantonese) as separate targets. Speech in
   any language Whisper recognizes can be translated *from*; only the target
   is limited to this list. More targets can always be added live from
   Settings too.
-- `--model SIZE` - initial speech model: a Whisper size (default:
-  `large-v3`), or `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see below) -
+- `--model SIZE` - initial speech model: a Whisper size, or
+  `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see below) (default: the last run's;
+  first run `qwen3-asr-1.7b` if it's installed, else `large-v3`) -
   changeable live from Settings afterward (briefly pauses captioning while
   it swaps).
 - `--position top|bottom` - initial overlay screen anchor for every window
@@ -194,7 +218,18 @@ with unlabeled captions for system audio (your own `[You]` mic captions are
 always labeled). Note the bridge can't isolate simultaneous speakers' audio
 from each other (that would need a bot with real per-user voice-receive) -
 it only improves *identity and segment timing* on top of the existing
-mixed loopback audio.
+mixed loopback audio. Some rules keep that mixing from producing wrong
+captions:
+
+- When two people are flagged as speaking over the same audio (say, one's
+  mic picking up the other), it's captioned once, not twice.
+- Someone flagged as speaking for over 20 seconds straight - usually an
+  open mic held on by background noise - can't cause anyone else's speech
+  to be skipped that way, and their live captions are skipped while the
+  audio is mostly other people talking.
+- A reply that starts in someone's last second or so is cut off the end of
+  their caption, and a joined caption never spans a gap someone else spoke
+  in.
 
 ## Notes
 

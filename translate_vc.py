@@ -26,7 +26,8 @@ from opencc import OpenCC
 import discord_bridge
 import translator
 from lang_codes import TARGET_LANGUAGES
-from overlay_core import is_reliable_transcription, run_translator
+import settings
+from overlay_core import is_reliable_transcription, run_translator, speech_options
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
@@ -66,9 +67,13 @@ def _is_degenerate(text):
     return False
 
 
-def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False, absorb=()):
+def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False, absorb=(),
+                  speech_end=None):
     q.put({
         "speaker": lead.strip(),
+        "lang": lang,
+        "proc": elapsed,
+        "speech_end": speech_end,  # the overlay turns this into the shown delay
         "meta": f"[{lang}, {elapsed:.1f}s]",
         "native": native_text,
         "translated": translated_text,
@@ -87,7 +92,7 @@ def make_process_segment(targets, caption_queues, translation_enabled):
     request entirely."""
 
     def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False,
-                        absorb=()):
+                        absorb=(), speech_end=None):
         """caption_group/final: a long Discord interval's live captions
         (final=False) share a group, and its final caption (final=True)
         replaces them in each overlay - see overlay_core.BRIDGE_FINAL_MAX_SEC.
@@ -95,7 +100,8 @@ def make_process_segment(targets, caption_queues, translation_enabled):
         speaker's back-to-back intervals joined into one caption (see
         overlay_core.BRIDGE_JOIN_GAP_SEC). segment None with a group just
         removes that group's live captions. If the final pass yields
-        nothing usable the earlier captions stay."""
+        nothing usable the earlier captions stay. speech_end: when the
+        speech ended, for the overlay's end-to-end delay readout."""
         if caption_group and final and segment is None:
             for q in caption_queues.values():
                 q.put({"group": caption_group, "final": True, "native": None})
@@ -105,13 +111,14 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             # (see ModelHolder.request_reload) - nothing to transcribe with.
             return
         t0 = time.time()
-        segments_gen, info = model.transcribe(
-            segment,
-            task="transcribe",
-            vad_filter=False,
-            beam_size=5,
-            condition_on_previous_text=False,
-        )
+        options = dict(task="transcribe", vad_filter=False, beam_size=5, condition_on_previous_text=False,
+                       language=speech_options["language"], initial_prompt=speech_options["context"].strip() or None)
+        try:
+            segments_gen, info = model.transcribe(segment, **options)
+        except ValueError:
+            # A forced language this model doesn't know (Cantonese on a
+            # pre-large-v3 Whisper) - fall back to detecting it.
+            segments_gen, info = model.transcribe(segment, **dict(options, language=None))
         native_segments = list(segments_gen)
 
         if not is_reliable_transcription(native_segments, info):
@@ -152,18 +159,18 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             if info.language == "zh" and target_lang in CHINESE_TARGETS:
                 elapsed = time.time() - t0
                 shown = CHINESE_TARGETS[target_lang].convert(native_text)
-                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final, absorb)
+                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final, absorb, speech_end)
                 continue
 
             if info.language == target_lang:
                 # already the target language - nothing to translate
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end)
                 continue
 
             if not translation_enabled.get(target_lang, True):
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end)
                 continue
 
             # Every target, English included, goes through the translator -
@@ -182,22 +189,25 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             # if it were a translation.
             if _is_degenerate(translated):
                 translated = ""
-            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final, absorb)
+            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final, absorb, speech_end)
 
     return process_segment
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Live translator overlay for Discord/system audio.")
+    saved = settings.load()
+    parser = argparse.ArgumentParser(
+        description="Live translator overlay for Discord/system audio. Options left out come from the last run "
+                    "(settings.json).")
     parser.add_argument(
         "--target", "-t", default=None,
         help="Comma-separated target language code(s), e.g. 'en,vi'. One shared audio/transcription "
-             f"pipeline is used, with one overlay window per target. Supported: {', '.join(sorted(TARGET_LANGUAGES))} "
-             "(default: shows a GUI picker for this and the other options below)",
+             f"pipeline is used, with one overlay window per target. Supported: {', '.join(sorted(TARGET_LANGUAGES))}",
     )
     parser.add_argument(
         "--model", "-m", default=None,
-        help="Speech model: a Whisper size, or qwen3-asr-1.7b / qwen3-asr-0.6b (default: large-v3)",
+        help="Speech model: a Whisper size, or qwen3-asr-1.7b / qwen3-asr-0.6b "
+             "(default: qwen3-asr-1.7b if installed, else large-v3)",
     )
     parser.add_argument(
         "--position", choices=["top", "bottom"], default=None,
@@ -205,24 +215,25 @@ def main():
     )
     parser.add_argument("--no-mic", action="store_true", help="Don't also capture your microphone")
     parser.add_argument(
-        "--discord-bridge-port", type=int, default=discord_bridge.DEFAULT_PORT,
+        "--discord-bridge-port", type=int, default=None,
         help=f"Port the optional Discord speaking-bridge WebSocket server listens on (default: {discord_bridge.DEFAULT_PORT})",
     )
     args = parser.parse_args()
 
-    # The Settings window (always available - see overlay_core.run_translator)
-    # replaces what used to be a one-shot picker dialog. It's meant to start
-    # hidden/tray-only for scripted launches that shouldn't pop a window
-    # unasked (--target given) - but the tray icon is currently disabled
-    # (see run_translator's comment - pystray segfaults against Tkinter in
-    # this environment), and hidden-with-no-tray would strand it unreachable.
-    # Always show it for now; revert to `args.target is None` once tray's
-    # safe to re-enable.
+    # The Settings window is meant to start hidden/tray-only for scripted
+    # launches that shouldn't pop a window unasked - but the tray icon is
+    # currently disabled (see run_translator's comment - pystray segfaults
+    # against Tkinter in this environment), and hidden-with-no-tray would
+    # strand it unreachable. Always show it for now.
     show_settings = True
-    initial_targets = list(dict.fromkeys(t.strip().lower() for t in (args.target or "en").split(",") if t.strip()))
+    target_arg = args.target or ",".join(saved["targets"]) or "en"
+    initial_targets = list(dict.fromkeys(t.strip().lower() for t in target_arg.split(",") if t.strip()))
     for target in initial_targets:
         if target not in TARGET_LANGUAGES:
             raise SystemExit(f"Unsupported target language '{target}'. Supported: {', '.join(sorted(TARGET_LANGUAGES))}")
+
+    speech_options["language"] = saved["language"]
+    speech_options["context"] = saved["context"]
 
     # Targets are addable live from Settings at any time, not just at
     # startup - so the translator loads regardless of what's initially
@@ -230,16 +241,14 @@ def main():
     # the load tracked in its status panel.
     translator.start()
 
-    model_size = args.model or "large-v3"
-
     run_translator(
         make_process_segment,
         initial_targets,
-        model_size=model_size,
-        capture_mic=not args.no_mic,
-        discord_bridge_port=args.discord_bridge_port,
+        model_size=args.model or saved["model"],
+        capture_mic=saved["mic"] and not args.no_mic,
+        discord_bridge_port=args.discord_bridge_port or saved["bridge_port"],
         show_settings=show_settings,
-        initial_position=args.position,
+        initial_position=args.position or saved["position"],
     )
 
 

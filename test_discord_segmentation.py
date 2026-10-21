@@ -113,7 +113,7 @@ def test_live_captions_then_final_replaces_them():
 
     _stop("8", now)
     final = _run_drain(buffer)
-    assert len(final) == 1 and final[0][4] == {"caption_group": group, "final": True, "absorb": []}, final
+    assert len(final) == 1 and final[0][4]["caption_group"] == group and final[0][4]["final"] is True and final[0][4]["absorb"] == [], final
     assert len(final[0][1]) >= int(6.5 * SR), f"final segment only {len(final[0][1]) / SR:.2f}s"
     print(f"OK: live caption at 7s, then a {len(final[0][1]) / SR:.2f}s final replacing it ({group})")
 
@@ -125,14 +125,14 @@ def test_skipped_interval_takes_back_its_live_captions():
     _speak("9", "Eddie", now - 9.0)
     _speak("10", "Deep Thought", now - 8.0)  # open-mic echo of Eddie's speech
     live = _run_drain(buffer)
-    assert len(live) == 2, live
+    assert [c[3][1] for c in live] == ["Deep Thought"], live  # the echo pair: only the later starter gets live pieces
     group = next(c[4]["caption_group"] for c in live if c[3][1] == "Deep Thought")
 
     _stop("10", now - 0.5)
     _stop("9", now)
     calls = _run_drain(buffer)
     removal = [c for c in calls if c[1] is None]
-    assert len(removal) == 1 and removal[0][4] == {"caption_group": group, "final": True, "absorb": []}, calls
+    assert len(removal) == 1 and removal[0][4] == {"caption_group": group, "final": True}, calls
     assert [c[3][1] for c in calls if c[1] is not None] == ["Eddie"], calls
     print("OK: covered interval's live caption taken back, speaker's final kept")
 
@@ -244,6 +244,63 @@ def test_join_absorbs_live_captions():
     print("OK: joined final replaces the earlier caption and absorbs the live ones")
 
 
+def test_open_mic_cannot_cover_everyone():
+    # Someone's mic held "speaking" by background noise for minutes: other
+    # people's speech inside it must still be captioned, not skipped as
+    # covered by it - and the open-mic interval's live pieces, mostly their
+    # speech, are skipped instead.
+    _reset()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=24.0, start_ts=now - 24.0)
+    _speak("20", "OpenMic", now - 24.0)            # still open, 24s and counting
+    _speak("21", "Ford", now - 9.0, now - 4.0)
+
+    calls = _run_drain(buffer)
+    speakers = [c[3][1] for c in calls]
+    assert "Ford" in speakers, f"Ford's speech was skipped as covered by the open mic: {speakers}"
+    assert "OpenMic" not in speakers or all(c[4]["final"] is False for c in calls if c[3][1] == "OpenMic")
+    print(f"OK: open mic for 24s doesn't swallow Ford's caption ({speakers})")
+
+    # A live piece of the open mic made mostly of someone else's speech is skipped.
+    _reset()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
+    _speak("20", "OpenMic", now - 7.0)
+    _speak("21", "Ford", now - 6.5)
+    calls = _run_drain(buffer)
+    assert [c[3][1] for c in calls] == ["Ford"], [c[3] for c in calls]
+    print("OK: live piece that's mostly someone else's speech skipped")
+
+
+def test_join_blocked_by_reply_in_gap():
+    # Zaphod gets a word in during Arthur's pause (too short to caption on
+    # its own) - joining Arthur's pieces would sweep it in under his name.
+    _reset()
+    buffer, t0 = _make_buffer(seconds=8.0)
+    _speak("22", "Arthur", t0 + 0.5, t0 + 2.0)
+    first = _run_drain(buffer)
+    _speak("23", "Zaphod", t0 + 2.4, t0 + 2.7)
+    _speak("22", "Arthur", t0 + 3.5, t0 + 5.0)
+    second = _run_drain(buffer)
+    assert second[0][4]["caption_group"] != first[0][4]["caption_group"], (first, second)
+    print("OK: no join across a gap someone else spoke in")
+
+
+def test_reply_at_the_end_is_trimmed_off():
+    # Ford starts replying 0.8s before Arthur's interval closes - Arthur's
+    # final stops 0.3s into Ford's reply instead of taking all of it.
+    _reset()
+    buffer, t0 = _make_buffer(seconds=6.0)
+    _speak("24", "Arthur", t0 + 0.5)
+    _speak("25", "Ford", t0 + 3.2)
+    _stop("24", t0 + 4.0)
+    calls = _run_drain(buffer)
+    arthur = [c for c in calls if c[3][1] == "Arthur"]
+    expected = (3.2 + 0.3 - 0.5) + 2 * overlay_core.BRIDGE_SLICE_PAD_SEC
+    assert arthur and abs(len(arthur[0][1]) / SR - expected) <= 0.21, (len(arthur[0][1]) / SR, expected)
+    print(f"OK: Arthur's final trimmed to {len(arthur[0][1]) / SR:.2f}s, leaving out Ford's reply")
+
+
 if __name__ == "__main__":
     test_speaking_interval_cuts_expected_segment()
     test_short_interval_is_dropped()
@@ -256,4 +313,7 @@ if __name__ == "__main__":
     test_consecutive_intervals_joined()
     test_join_breaks_on_other_speaker_or_long_gap()
     test_join_absorbs_live_captions()
+    test_open_mic_cannot_cover_everyone()
+    test_join_blocked_by_reply_in_gap()
+    test_reply_at_the_end_is_trimmed_off()
     print("ALL OK")

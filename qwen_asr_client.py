@@ -20,6 +20,7 @@ import os
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from types import SimpleNamespace
 
@@ -50,6 +51,10 @@ LANGUAGE_CODES = {
     "dutch": "nl", "swedish": "sv", "danish": "da", "finnish": "fi", "polish": "pl", "czech": "cs",
     "filipino": "tl", "persian": "fa", "greek": "el", "hungarian": "hu", "macedonian": "mk", "romanian": "ro",
 }
+
+
+# The other way, for a forced conversation language (overlay_core.speech_options).
+LANGUAGE_NAMES = {code: name.capitalize() for name, code in LANGUAGE_CODES.items()}
 
 
 def is_qwen_model(size):
@@ -91,16 +96,26 @@ class QwenASRModel:
         self.close()
         raise RuntimeError("Qwen3-ASR server failed to start - see logs/qwen-asr-server.log")
 
-    def transcribe(self, audio, language=None, **_whisper_only_options):
+    def transcribe(self, audio, language=None, initial_prompt=None, **_whisper_only_options):
         """Returns (segments, info) shaped like faster-whisper's: segments
         have .text/.no_speech_prob/.avg_logprob, info has .language/
         .language_probability. Qwen gives no confidences, so those are
         neutral values that pass the reliability filter - an empty
         transcription, or one Qwen flags as silent, comes back as no
         segments instead, which fails it.
-        `language` is ignored: the second-pass forced-language decode it
-        exists for (Whisper's translate task) is gone from the app."""
-        req = urllib.request.Request(f"{self._url}/transcribe",
+        language: a code to force instead of detecting (raises ValueError
+        for one Qwen doesn't support, like WhisperModel does);
+        initial_prompt: Whisper's name for it, passed as Qwen's context -
+        names and slang it should spell the way they're written there."""
+        params = {}
+        if language:
+            if language not in LANGUAGE_NAMES:
+                raise ValueError(f"Qwen3-ASR doesn't support language {language!r}")
+            params["language"] = LANGUAGE_NAMES[language]
+        if initial_prompt:
+            params["context"] = initial_prompt
+        query = f"?{urllib.parse.urlencode(params)}" if params else ""
+        req = urllib.request.Request(f"{self._url}/transcribe{query}",
                                      data=np.asarray(audio, dtype="<f4").tobytes(),
                                      headers={"Content-Type": "application/octet-stream"})
         with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SEC) as r:

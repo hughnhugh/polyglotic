@@ -11,8 +11,9 @@ from tkinter import ttk
 
 import torch
 
+import settings
 from lang_codes import LANGUAGE_NAMES
-from overlay_core import STATUS_FIELDS
+from overlay_core import STATUS_FIELDS, speech_options
 from overlay_core import status as system_status
 
 # torch.cuda.memory_*() only tracks memory PyTorch's own allocator claimed -
@@ -56,7 +57,7 @@ class SettingsWindow:
         )
 
         root.configure(bg=BG)
-        root.geometry("520x640")
+        root.geometry("520x760")
         root.minsize(420, 480)
 
         def section(text):
@@ -102,6 +103,29 @@ class SettingsWindow:
         )
         self.model_combo.pack(fill="x", padx=12)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)
+
+        lang_frame = tk.Frame(root, bg=BG)
+        lang_frame.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(lang_frame, text="Conversation language:", fg=FG, bg=BG, font=("Segoe UI", 9)).pack(side="left")
+        self._language_by_label = {label: code for code, label in settings.CONVERSATION_LANGUAGES.items()}
+        self.language_var = tk.StringVar(value=settings.CONVERSATION_LANGUAGES.get(speech_options["language"],
+                                                                                   "Auto-detect"))
+        language_combo = ttk.Combobox(lang_frame, textvariable=self.language_var, state="readonly", width=18,
+                                      values=list(settings.CONVERSATION_LANGUAGES.values()))
+        language_combo.pack(side="left", padx=6)
+        language_combo.bind("<<ComboboxSelected>>", self._on_language_selected)
+
+        context_frame = tk.Frame(root, bg=BG)
+        context_frame.pack(fill="x", padx=12, pady=(4, 0))
+        tk.Label(context_frame, text="Names & slang:", fg=FG, bg=BG, font=("Segoe UI", 9)).pack(side="left")
+        self.context_var = tk.StringVar(value=speech_options["context"])
+        tk.Entry(context_frame, textvariable=self.context_var, bg="#333333", fg=FG, insertbackground=FG).pack(
+            side="left", fill="x", expand=True, padx=6
+        )
+        tk.Button(
+            context_frame, text="Apply", command=self._on_apply_context, bg="#333333", fg=FG,
+            activebackground="#444444", activeforeground=FG, relief="flat", padx=8,
+        ).pack(side="left")
 
         # --- Overlay position -------------------------------------------------
         section("Overlay position")
@@ -184,8 +208,22 @@ class SettingsWindow:
         pos = self.position_var.get()
         self.controller.set_position(None if pos == "auto" else pos)
 
+    def _on_language_selected(self, event=None):
+        code = self._language_by_label[self.language_var.get()]
+        speech_options["language"] = code
+        settings.update(language=code)
+
+    def _on_apply_context(self):
+        # e.g. "Caleb, marina, HSK, bún bò" - the speech model leans toward
+        # these spellings. Takes effect from the next segment.
+        context = self.context_var.get().strip()
+        speech_options["context"] = context
+        settings.update(context=context)
+        self.status_label.config(text="Names & slang applied." if context else "Names & slang cleared.")
+
     def _on_mic_toggle(self):
         self.controller.mic_capture.set_enabled(self.mic_var.get())
+        settings.update(mic=self.mic_var.get())
 
     def _on_apply_port(self):
         try:
