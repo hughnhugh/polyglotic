@@ -84,6 +84,10 @@ def make_process_segment(targets, caption_queues, translation_enabled):
     request entirely."""
 
     def process_segment(model, segment, source_tag="", speaker_hint=None):
+        if model is None:
+            # Submitted while a speech-model swap had the old one unloaded
+            # (see ModelHolder.request_reload) - nothing to transcribe with.
+            return
         t0 = time.time()
         segments_gen, info = model.transcribe(
             segment,
@@ -177,7 +181,7 @@ def main():
     )
     parser.add_argument(
         "--model", "-m", default=None,
-        help="Whisper model size (default: large-v3)",
+        help="Speech model: a Whisper size, or qwen3-asr-1.7b / qwen3-asr-0.6b (default: large-v3)",
     )
     parser.add_argument(
         "--position", choices=["top", "bottom"], default=None,

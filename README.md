@@ -88,7 +88,7 @@ PyTorch-only number that misses Whisper's usage entirely.
 This is a persistent app, not a one-shot script: a **Settings window** is
 always available - a normal, taskbar-visible window (alt-tabbable like any
 other app) where you pick target languages (by name, e.g. "Vietnamese", not
-code), Whisper model size, overlay position, mic capture, and the Discord
+code), speech model, overlay position, mic capture, and the Discord
 bridge port, all editable live while it keeps running - checking/unchecking
 a language opens/closes its overlay immediately, no restart needed.
 
@@ -127,7 +127,8 @@ tagged `[You]`, unless toggled off.
   any language Whisper recognizes can be translated *from*; only the target
   is limited to this list. More targets can always be added live from
   Settings too.
-- `--model SIZE` - initial Whisper model size (default: `large-v3`) -
+- `--model SIZE` - initial speech model: a Whisper size (default:
+  `large-v3`), or `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see below) -
   changeable live from Settings afterward (briefly pauses captioning while
   it swaps).
 - `--position top|bottom` - initial overlay screen anchor for every window
@@ -135,6 +136,35 @@ tagged `[You]`, unless toggled off.
   changeable live from Settings afterward.
 - `--no-mic` - don't capture your microphone at startup - changeable live
   from Settings afterward.
+
+## Qwen3-ASR speech model (optional)
+
+An alternative to Whisper for transcription, picked from Settings' "Speech
+model" dropdown (`qwen3-asr-1.7b` or `qwen3-asr-0.6b`). Alibaba's
+Qwen3-ASR is much stronger than Whisper on Cantonese and other Chinese
+dialects (by Qwen's own benchmarks - roughly half Whisper's error rate on
+Cantonese, far less on conversational Cantonese), and reports Cantonese as
+its own language instead of lumping it in with Mandarin. It also stays
+silent on silence and background noise, where Whisper tends to invent
+text that the app then has to filter out.
+
+Setup is opt-in, since it's ~9GB more on disk - run `setup.bat -QwenASR`.
+It needs its own Python environment (`venv-qwen-asr\`): the `qwen-asr`
+package pins library versions that conflict with faster-whisper's. The
+app runs it as a separate background process, started when you pick it
+and stopped when you switch back.
+
+Trade-offs, measured on this setup:
+
+| | VRAM | Time per ~4s segment |
+|---|---|---|
+| Whisper `large-v3` | ~4.0GB | ~0.4s |
+| `qwen3-asr-0.6b` | ~2.0GB | ~0.5s |
+| `qwen3-asr-1.7b` | ~5GB (est.) | not yet measured |
+
+Whisper's confidence scores, which the app uses to catch made-up text, don't
+exist for Qwen3-ASR - it relies on the VAD gate and Qwen's own "no speech"
+signal instead.
 
 ## Speaker identification (optional, Discord only, advanced setup)
 
@@ -219,6 +249,8 @@ mixed loopback audio.
   hear it - either match them, or see PyAudioWPatch's docs for capturing a
   specific device.
 - **Model reload / GPU memory reading not moving.** The Settings window's
-  "Whisper model" status row is the source of truth for whether a model
+  "Speech model" status row is the source of truth for whether a model
   switch actually completed (`Ready (size)`); the GPU row needs
   `nvidia-ml-py` installed to see Whisper's memory at all (see Setup above).
+  A failed switch to Qwen3-ASR reverts to the previous model - its server
+  log is `logs/qwen-asr-server.log`.

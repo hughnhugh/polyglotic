@@ -17,16 +17,15 @@ model to over-interpret a line into something fluent but different.
 """
 
 import atexit
-import ctypes
 import json
 import os
-import socket
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 
+from child_process import free_port, kill_with_parent
 from lang_codes import CHINESE_CODES, TARGET_LANGUAGES
 from overlay_core import LOG_DIR, broadcast, status
 
@@ -45,55 +44,6 @@ _proc = None
 _base_url = None
 _ready = threading.Event()
 _failed = threading.Event()
-_job = None  # Windows job object handle - must stay referenced, closing it kills the server
-
-
-def _free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def _kill_with_parent(proc):
-    """Put the server in a Windows job object that kills it when this
-    process exits for any reason - including a hard crash, where atexit
-    never runs - so an orphaned server can't keep ~5GB of VRAM pinned."""
-    global _job
-
-    class IO_COUNTERS(ctypes.Structure):
-        _fields_ = [(n, ctypes.c_ulonglong) for n in (
-            "ReadOperationCount", "WriteOperationCount", "OtherOperationCount",
-            "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
-
-    class BASIC_LIMITS(ctypes.Structure):
-        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
-                    ("LimitFlags", ctypes.c_uint32), ("MinimumWorkingSetSize", ctypes.c_size_t),
-                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", ctypes.c_uint32),
-                    ("Affinity", ctypes.c_size_t), ("PriorityClass", ctypes.c_uint32),
-                    ("SchedulingClass", ctypes.c_uint32)]
-
-    class EXTENDED_LIMITS(ctypes.Structure):
-        _fields_ = [("BasicLimitInformation", BASIC_LIMITS), ("IoInfo", IO_COUNTERS),
-                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
-                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
-
-    JobObjectExtendedLimitInformation = 9
-    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-    kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-
-    job = kernel32.CreateJobObjectW(None, None)
-    if not job:
-        return
-    limits = EXTENDED_LIMITS()
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-    if (kernel32.SetInformationJobObject(job, JobObjectExtendedLimitInformation,
-                                         ctypes.byref(limits), ctypes.sizeof(limits))
-            and kernel32.AssignProcessToJobObject(job, int(proc._handle))):
-        _job = job
 
 
 def start():
@@ -110,7 +60,7 @@ def start():
         return
 
     status.set("translator", f"Loading {MODEL_NAME}...")
-    port = _free_port()
+    port = free_port()
     _base_url = f"http://127.0.0.1:{port}"
     os.makedirs(LOG_DIR, exist_ok=True)
     log_path = os.path.join(LOG_DIR, "llama-server.log")
@@ -120,7 +70,7 @@ def start():
          "-ngl", "999", "-c", str(CONTEXT_TOKENS), "-np", "1", "-fa", "on", "--jinja", "--no-webui"],
         stdout=log_file, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW,
     )
-    _kill_with_parent(_proc)
+    kill_with_parent(_proc)  # can never outlive the app and keep ~5GB of VRAM pinned
     atexit.register(stop)
 
     def _wait_until_ready():

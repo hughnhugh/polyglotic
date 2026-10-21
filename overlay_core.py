@@ -83,8 +83,24 @@ class SelfCaptionState:
         button.config(fg="white" if self.enabled else "#555555")
 
 
+def _load_speech_model(size, device, compute_type):
+    """A WhisperModel, or - for a "qwen3-asr-*" size - Qwen3-ASR behind the
+    same transcribe() interface (see qwen_asr_client.py)."""
+    from qwen_asr_client import QwenASRModel, is_qwen_model  # local import - it imports this module
+    if is_qwen_model(size):
+        return QwenASRModel(size)
+    return WhisperModel(size, device=device, compute_type=compute_type)
+
+
+def _release_speech_model(model):
+    close = getattr(model, "close", None)  # Qwen3-ASR's server process; Whisper just needs dropping
+    if close is not None:
+        close()
+
+
 class ModelHolder:
-    """Thread-safe holder for the current WhisperModel, swappable at runtime.
+    """Thread-safe holder for the current speech model (a WhisperModel, or
+    Qwen3-ASR - see _load_speech_model), swappable at runtime.
     The capture loop fetches .get() at *submission* time (not once at
     worker-start), so a reload never yanks the model out from under an
     already-submitted transcription job. request_reload() queues the swap on
@@ -105,8 +121,8 @@ class ModelHolder:
 
     def _load_initial(self):
         status.set("whisper_model", f"Loading ({self.size})...")
-        broadcast(f"Loading Whisper model ({self.size}) on {self.device}...")
-        model = WhisperModel(self.size, device=self.device, compute_type=self.compute_type)
+        broadcast(f"Loading speech model ({self.size}) on {self.device}...")
+        model = _load_speech_model(self.size, self.device, self.compute_type)
         with self._lock:
             self._model = model
         status.set("whisper_model", f"Ready ({self.size})")
@@ -124,21 +140,30 @@ class ModelHolder:
         def _do_reload():
             old_size = self.size
             status.set("whisper_model", f"Reloading ({old_size} -> {new_size})...")
-            broadcast(f"Reloading Whisper model ({old_size} -> {new_size})...")
+            broadcast(f"Reloading speech model ({old_size} -> {new_size})...")
+            # Unload before loading, rather than swapping once the new one is
+            # up: next to the translator there isn't VRAM for two speech
+            # models at once. Captioning is paused either way - this runs
+            # on the same single-worker executor as transcription.
+            old_model = self.get()
+            with self._lock:
+                self._model = None
+            _release_speech_model(old_model)
+            del old_model
+            if self.device == "cuda":
+                torch.cuda.empty_cache()
+            loaded_size = new_size
             try:
-                new_model = WhisperModel(new_size, device=self.device, compute_type=self.compute_type)
-                old_model = self.get()
-                with self._lock:
-                    self._model = new_model
-                    self.size = new_size
-                del old_model
-                if self.device == "cuda":
-                    torch.cuda.empty_cache()
-                status.set("whisper_model", f"Ready ({new_size})")
-                broadcast(f"Model reloaded ({new_size}).")
+                new_model = _load_speech_model(new_size, self.device, self.compute_type)
             except Exception as e:
-                status.set("whisper_model", f"Error: {type(e).__name__}")
-                broadcast(f"[ERROR] model reload failed: {type(e).__name__}: {e}")
+                broadcast(f"[ERROR] model reload failed: {type(e).__name__}: {e} - reverting to {old_size}")
+                loaded_size = old_size
+                new_model = _load_speech_model(old_size, self.device, self.compute_type)
+            with self._lock:
+                self._model = new_model
+                self.size = loaded_size
+            status.set("whisper_model", f"Ready ({loaded_size})")
+            broadcast(f"Model reloaded ({loaded_size}).")
 
         self._executor.submit(_do_reload)
 
@@ -246,7 +271,7 @@ def broadcast(msg):
 
 STATUS_FIELDS = [
     ("vad", "VAD"),
-    ("whisper_model", "Whisper model"),
+    ("whisper_model", "Speech model"),
     ("translator", "Translation (Hy-MT2)"),
     ("gpu", "GPU memory"),
     ("loopback", "System audio"),

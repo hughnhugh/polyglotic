@@ -1,4 +1,4 @@
-"""The app's persistent Settings window - target languages, Whisper model,
+"""The app's persistent Settings window - target languages, speech model,
 overlay position, mic capture, and the Discord bridge port, all editable
 live while the pipeline keeps running (see overlay_core.PipelineController).
 Window-level behavior (taskbar presence, minimize-to-tray, the X button)
@@ -28,9 +28,12 @@ except Exception:
     pynvml = None
     _NVML_HANDLE = None
 
-WHISPER_MODEL_SIZES = [
+# Whisper sizes, plus Qwen3-ASR (see qwen_asr_client.py) - an alternative
+# engine behind the same dropdown, stronger on Chinese/Cantonese.
+SPEECH_MODELS = [
     "tiny", "tiny.en", "base", "base.en", "small", "small.en",
     "medium", "medium.en", "distil-large-v3", "large-v1", "large-v2", "large-v3",
+    "qwen3-asr-0.6b", "qwen3-asr-1.7b",
 ]
 
 LANG_COLUMNS = 4
@@ -91,11 +94,11 @@ class SettingsWindow:
             )
             cb.grid(row=i // LANG_COLUMNS, column=i % LANG_COLUMNS, sticky="w", padx=4, pady=1)
 
-        # --- Whisper model ---------------------------------------------------
-        section("Whisper model")
+        # --- Speech model ----------------------------------------------------
+        section("Speech model")
         self.model_var = tk.StringVar(value=controller.model_holder.size)
         self.model_combo = ttk.Combobox(
-            root, textvariable=self.model_var, values=WHISPER_MODEL_SIZES, state="disabled"
+            root, textvariable=self.model_var, values=SPEECH_MODELS, state="disabled"
         )
         self.model_combo.pack(fill="x", padx=12)
         self.model_combo.bind("<<ComboboxSelected>>", self._on_model_selected)

@@ -8,7 +8,13 @@
     This does NOT install Python or NVIDIA drivers themselves - those are
     system-wide changes this script won't make for you; it just detects them
     and tells you what's missing.
+
+    -QwenASR also sets up the optional Qwen3-ASR speech model (~9GB more):
+    its own venv (venv-qwen-asr/ - its packages conflict with faster-whisper's)
+    and both model sizes in models/.
 #>
+
+param([switch]$QwenASR)
 
 $ErrorActionPreference = "Stop"
 
@@ -159,9 +165,55 @@ if ((Test-Path $modelPath) -and (Get-Item $modelPath).Length -eq $modelSize) {
     Get-Download $modelUrl $modelPath $modelSize
 }
 
+# --- Optional: Qwen3-ASR speech model ------------------------------------
+if ($QwenASR) {
+    $qwenPython = ".\venv-qwen-asr\Scripts\python.exe"
+    if (Test-Path $qwenPython) {
+        Write-Step "Reusing existing venv-qwen-asr\"
+    } else {
+        Write-Step "Creating venv-qwen-asr\ (separate from venv\ - qwen-asr's pinned packages conflict with faster-whisper's)"
+        & $pythonExe @pythonPrefixArgs -m venv venv-qwen-asr
+        if ($LASTEXITCODE -ne 0) {
+            Exit-WithError "Failed to create venv-qwen-asr."
+        }
+    }
+    foreach ($step in @(
+        @("Upgrading pip (Qwen3-ASR venv)", @("--upgrade", "pip")),
+        @("Installing PyTorch into the Qwen3-ASR venv (CUDA build)", @("torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128")),
+        @("Installing qwen-asr", @("qwen-asr"))
+    )) {
+        Write-Step $step[0]
+        & $qwenPython -m pip install @($step[1])
+        if ($LASTEXITCODE -ne 0) {
+            Exit-WithError "Failed installing: $($step[0])"
+        }
+    }
+
+    $qwenModels = @{
+        "Qwen3-ASR-0.6B" = @(,@("model.safetensors", 1876091704))  # leading comma: keeps a 1-element list of pairs from flattening
+        "Qwen3-ASR-1.7B" = @(@("model-00001-of-00002.safetensors", 4220320824), @("model-00002-of-00002.safetensors", 478200688), @("model.safetensors.index.json", 0))
+    }
+    $smallFiles = @("chat_template.json", "config.json", "generation_config.json", "merges.txt", "preprocessor_config.json", "tokenizer_config.json", "vocab.json")
+    foreach ($name in $qwenModels.Keys) {
+        $dir = "models\$name"
+        Write-Step "Downloading $name (resumes if interrupted)"
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        $files = @($smallFiles | ForEach-Object { ,@($_, 0) }) + $qwenModels[$name]
+        foreach ($f in $files) {
+            $dest = "$dir\$($f[0])"
+            if ((Test-Path $dest) -and ($f[1] -eq 0 -or (Get-Item $dest).Length -eq $f[1])) { continue }
+            Get-Download "https://huggingface.co/Qwen/$name/resolve/main/$($f[0])" $dest $f[1]
+        }
+    }
+}
+
 Write-Step "Setup complete"
 Write-Host "Run vc-translator with:"
 Write-Host "  .\venv\Scripts\python.exe translate_vc.py"
 Write-Host ""
+if ($QwenASR) {
+    Write-Host "Pick qwen3-asr-1.7b or qwen3-asr-0.6b under Speech model in Settings, or pass --model."
+    Write-Host ""
+}
 Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"
 Write-Host "this only happens once and needs an internet connection."
