@@ -11,7 +11,7 @@ from tkinter import ttk
 
 import torch
 
-from lang_codes import LANGUAGE_NAMES, WHISPER_TO_FLORES
+from lang_codes import LANGUAGE_NAMES
 from overlay_core import STATUS_FIELDS
 from overlay_core import status as system_status
 
@@ -80,7 +80,7 @@ class SettingsWindow:
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
-        by_name = sorted(WHISPER_TO_FLORES, key=lambda code: LANGUAGE_NAMES.get(code, code))
+        by_name = sorted(LANGUAGE_NAMES, key=lambda code: LANGUAGE_NAMES[code])
         for i, code in enumerate(by_name):
             var = tk.BooleanVar(value=code in controller.targets)
             self._lang_vars[code] = var
@@ -227,7 +227,7 @@ class SettingsWindow:
         if gpu_lbl is not None:
             if _NVML_HANDLE is not None:
                 # Whole-GPU reading via the driver (NVML) - sees Whisper's
-                # ctranslate2 allocations and NLLB's PyTorch allocations alike.
+                # ctranslate2 allocations and the translator's llama-server process alike.
                 info = pynvml.nvmlDeviceGetMemoryInfo(_NVML_HANDLE)
                 used_gb = info.used / (1024 ** 3)
                 total_gb = info.total / (1024 ** 3)

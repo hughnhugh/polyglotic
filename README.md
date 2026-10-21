@@ -2,9 +2,10 @@
 
 Live translator for Discord (or any Windows system audio). Captures your PC's
 audio output via WASAPI loopback plus your microphone, detects speech with
-Silero VAD, and translates it to a target language of your choosing using
-`faster-whisper` (and NLLB-200 for non-English targets) — all running
-locally on your GPU, no cloud APIs.
+Silero VAD, transcribes it with `faster-whisper`, and translates it to a
+target language of your choosing with Hy-MT2-7B, a translation-tuned LLM
+served by a local llama.cpp server — all running locally on your GPU, no
+cloud APIs.
 
 Shows a small always-on-top overlay with the original text and its
 translation. Pass a comma-separated `--target` list to get multiple
@@ -17,27 +18,33 @@ step runs once per target.
 
 - **Windows 10/11.** This uses WASAPI loopback audio capture and Win32-specific
   packages - it will not run on macOS/Linux.
-- **An NVIDIA GPU with CUDA support, and its driver installed.** Whisper
-  (large-v3 especially) and NLLB are heavy models - this isn't optional, there's
-  no CPU fallback mode. 8GB+ VRAM recommended for `large-v3`; smaller Whisper
-  models (see Options below) work fine on less.
+- **An NVIDIA GPU with CUDA support, and a recent driver (580 or newer -
+  CUDA 13).** Whisper and the translation model are heavy - this isn't
+  optional, there's no CPU fallback mode. **12GB+ VRAM recommended**: the
+  translator takes ~5GB and Whisper `large-v3` ~4GB, plus whatever else
+  (games, browser, Discord) is using the GPU. Smaller Whisper models (see
+  Options below) free up some of that.
 - **Python 3.12.** Get it from [python.org/downloads](https://www.python.org/downloads/)
   - during install, check **"Add python.exe to PATH"**, and check
   **"py launcher"** (on by default) - both are just checkboxes on the first
   install screen.
-- **~10GB free disk space** - dependencies (~4-5GB, mostly PyTorch+CUDA) plus
-  models downloaded on first run (~5GB - see Notes below).
-- **Internet connection** for setup and for the one-time model download on
+- **~15GB free disk space** - dependencies (~4-5GB, mostly PyTorch+CUDA), the
+  translator (~5GB, downloaded by setup) and the Whisper/VAD models downloaded
+  on first run (~3GB - see Notes below).
+- **Internet connection** for setup and for the one-time Whisper download on
   first launch. Not needed after that.
 
 ## Setup
 
 **Option A - automated (recommended):** double-click **`setup.bat`** in this
 folder. It finds your Python install, creates the project's virtual
-environment (`venv\`), and installs everything, printing clear errors if
-something's missing (e.g. no Python found, or no NVIDIA GPU detected). Safe
-to re-run any time - it reuses an existing `venv\` rather than recreating it,
-so re-running after a `git pull` just catches up on any new dependencies.
+environment (`venv\`), installs everything, and downloads the translator - a
+prebuilt llama.cpp server into `bin\` and the Hy-MT2-7B model (4.6GB) into
+`models\` - printing clear errors if something's missing (e.g. no Python
+found, or no NVIDIA GPU detected). Safe to re-run any time - it reuses an
+existing `venv\` and existing downloads rather than redoing them, so
+re-running after a `git pull` just catches up on anything new, and
+re-running after an interrupted model download resumes it.
 
 If Windows won't run `setup.ps1` directly (only relevant if you run the
 `.ps1` yourself instead of double-clicking `setup.bat`), that's PowerShell's
@@ -51,9 +58,17 @@ that one run, without changing any system-wide setting.
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install --upgrade pip
 .\venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented transformers sentencepiece websockets
+.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented websockets
 .\venv\Scripts\python.exe -m pip install nvidia-ml-py
 ```
+
+Then the translator: unzip llama.cpp's
+`llama-b11796-bin-win-cuda-13.4-x64.zip` and
+`cudart-llama-bin-win-cuda-13.4-x64.zip` from its
+[releases page](https://github.com/ggml-org/llama.cpp/releases/tag/b11796)
+into `bin\`, and download
+[`Hy-MT2-7B-Q4_K_M.gguf`](https://huggingface.co/tencent/Hy-MT2-7B-GGUF) into
+`models\`.
 
 `nvidia-ml-py` (the last line) is optional (Settings' GPU memory readout
 only) - queries the driver directly via NVML so it reflects everything using
@@ -106,12 +121,12 @@ tagged `[You]`, unless toggled off.
 
 - `--target LANG[,LANG...]` - one or more comma-separated target language
   codes to start captioning immediately (default: none - starts with
-  Settings open instead). 93 languages supported out of the box (see
-  `lang_codes.py`), including `zh` (Simplified Chinese) and `zh-hant`
-  (Traditional Chinese) as separate targets. Codes are validated against the
-  loaded NLLB tokenizer at startup - add more to `WHISPER_TO_FLORES` (and a
-  display name to `LANGUAGE_NAMES`) in `lang_codes.py` (needs a valid NLLB
-  flores200 code). More targets can always be added live from Settings too.
+  Settings open instead). 38 target languages - the ones Hy-MT2 supports
+  (see `lang_codes.py`), including `zh` (Simplified Chinese), `zh-hant`
+  (Traditional Chinese) and `yue` (Cantonese) as separate targets. Speech in
+  any language Whisper recognizes can be translated *from*; only the target
+  is limited to this list. More targets can always be added live from
+  Settings too.
 - `--model SIZE` - initial Whisper model size (default: `large-v3`) -
   changeable live from Settings afterward (briefly pauses captioning while
   it swaps).
@@ -153,14 +168,19 @@ mixed loopback audio.
 
 ## Notes
 
-- First run downloads the Silero VAD model, the Whisper model (~3GB for
-  `large-v3`), and NLLB-200 (~1.2GB) - NLLB now always loads at startup
-  (not just when a non-English target is requested), since targets are
-  addable live from Settings at any point during a run.
-- Whisper natively translates any spoken language straight into English in
-  one pass. For every other target, it transcribes the native speech first,
-  then a second model (NLLB-200) translates that text into the target
-  language.
+- First run downloads the Silero VAD model and the Whisper model (~3GB for
+  `large-v3`). The translation model is downloaded by setup instead (see
+  Setup above).
+- Whisper transcribes the native speech, then Hy-MT2-7B translates that text
+  into each target language - English included. It runs in a separate
+  `llama-server` process the app starts and stops itself (also killed
+  automatically if the app crashes, so it can't leave VRAM tied up); its
+  log goes to `logs/llama-server.log`. It loads in the background at
+  startup - captions show the native text alone until it's ready.
+- The translator is told it's working on casual, speech-recognized voice
+  chat, so it keeps a spoken register (slang, fillers, reactions) rather
+  than formalizing it. Hy-MT2 replaced NLLB-200 after a side-by-side on real
+  captions - `eval/compare_translators.py` reruns that comparison.
 - Chinese speech is normalized to Simplified for display; pick `--target
   zh-hant` if you want Traditional output instead.
 - Every session's captions are logged to `logs/` (gitignored) with
@@ -179,10 +199,16 @@ mixed loopback audio.
   on this system"). Use `setup.bat` instead - it invokes the `.ps1` with the
   restriction bypassed for just that one run. (Or manually:
   `powershell -ExecutionPolicy Bypass -File setup.ps1`.)
-- **First launch seems stuck / slow.** It's downloading the Whisper, NLLB,
-  and VAD models (~5GB total, one-time) - check the Settings window's status
+- **First launch seems stuck / slow.** It's downloading the Whisper and VAD
+  models (~3GB total, one-time) - check the Settings window's status
   panel, which shows "Loading..." per component. A slow/metered connection
   can make this take several minutes.
+- **Captions show only the original text, no translation.** Check the
+  Settings window's "Translation (Hy-MT2)" row. "Not installed" means
+  `bin\` or `models\` is missing - re-run `setup.bat`. "Failed" means the
+  server didn't start - see `logs/llama-server.log`; the usual causes are an
+  NVIDIA driver too old for CUDA 13, or not enough free VRAM (close other
+  GPU-heavy apps, or pick a smaller Whisper model).
 - **Symlink warning from `huggingface_hub` on first run.** Harmless - Windows
   needs Developer Mode or admin rights for symlinks; without them, model
   files are just copied instead, using a bit more disk space.

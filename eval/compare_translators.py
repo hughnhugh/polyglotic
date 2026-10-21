@@ -3,10 +3,13 @@ Side-by-side comparison of candidate translation models on real captions
 pulled from logs/, focused on casual voice-chat speech and on whether
 passing the previous few captions as context helps.
 
-Each candidate runs through a local llama-server (prebuilt llama.cpp in
-eval/bin/), one model at a time, against the same sampled lines. The
-current NLLB-600M runs as the baseline, and whatever the app actually
-showed at the time (from the logs) is included for reference.
+Each candidate runs through a local llama-server (the prebuilt llama.cpp
+setup.ps1 puts in bin/), one model at a time, against the same sampled
+lines. Whatever the app actually showed at the time (from the logs) is
+included as the baseline.
+
+This is how Hy-MT2-7B was chosen to replace NLLB-200-600M; that run also
+compared NLLB directly, which was dropped from here along with NLLB itself.
 
 Prompt variants per LLM:
     plain       - the model's standard translate prompt, line on its own
@@ -41,10 +44,9 @@ from opencc import OpenCC
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 from translate_vc import _is_degenerate  # noqa: E402
-from lang_codes import WHISPER_TO_FLORES  # noqa: E402
 
 EVAL_DIR = os.path.join(ROOT, "eval")
-LLAMA_SERVER = os.path.join(EVAL_DIR, "bin", "llama-server.exe")
+LLAMA_SERVER = os.path.join(ROOT, "bin", "llama-server.exe")
 PORT = 8091
 
 MODELS = {
@@ -341,9 +343,10 @@ def run_llm(name, items, variants, out_dir, write):
     from huggingface_hub import hf_hub_download
 
     spec = MODELS[name]
-    # A file already fetched into eval/models/ (e.g. with a resumable curl,
-    # when hf-xet keeps dropping on a slow connection) takes precedence.
-    local = os.path.join(EVAL_DIR, "models", spec["file"])
+    # A file already in models/ (where setup.ps1 puts the app's model, or
+    # fetched there with a resumable curl when hf-xet keeps dropping on a
+    # slow connection) takes precedence.
+    local = os.path.join(ROOT, "models", spec["file"])
     path = local if os.path.exists(local) else hf_hub_download(spec["repo"], spec["file"])
     print(f"\n== {name} ({spec['file']})", flush=True)
     vram = VramMonitor()
@@ -381,32 +384,6 @@ def run_llm(name, items, variants, out_dir, write):
     finally:
         server.close()
         delta = vram.stop()
-    print(f"  peak VRAM +{delta} MB", flush=True)
-    return delta
-
-
-def run_nllb(items, write):
-    import torch
-    from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
-    print("\n== nllb-600m (current app)", flush=True)
-    vram = VramMonitor()
-    name = "facebook/nllb-200-distilled-600M"
-    tok = AutoTokenizer.from_pretrained(name)
-    model = AutoModelForSeq2SeqLM.from_pretrained(name).to("cuda").half()
-    for item in items:
-        t0 = time.perf_counter()
-        tok.src_lang = WHISPER_TO_FLORES[item["src"]]
-        inputs = tok(item["text"], return_tensors="pt").to("cuda")
-        with torch.no_grad():
-            out = model.generate(**inputs, forced_bos_token_id=tok.convert_tokens_to_ids(WHISPER_TO_FLORES[item["tgt"]]),
-                                 max_new_tokens=200)
-        text = tok.batch_decode(out, skip_special_tokens=True)[0].strip()
-        write({"item": item["id"], "system": "nllb-600m", "variant": "plain", "output": text,
-               "ms": round((time.perf_counter() - t0) * 1000), "error": None})
-    del model
-    torch.cuda.empty_cache()
-    delta = vram.stop()
     print(f"  peak VRAM +{delta} MB", flush=True)
     return delta
 
@@ -577,9 +554,10 @@ a look: traditional (non-Simplified in a zh target), mandarin? (no Cantonese par
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--per-lang", type=int, default=40, help="source lines sampled per source language")
-    ap.add_argument("--models", default=",".join(MODELS), help="comma-separated subset of: " + ", ".join(MODELS))
+    # Defaults to the app's model only - the other candidates are multi-GB
+    # downloads, fetched on first use, so they have to be asked for.
+    ap.add_argument("--models", default="hymt2-7b", help="comma-separated, any of: " + ", ".join(MODELS))
     ap.add_argument("--variants", default=",".join(VARIANTS))
-    ap.add_argument("--no-nllb", action="store_true", help="skip the NLLB-600M baseline")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
 
@@ -604,8 +582,6 @@ def main():
     vram_before = VramMonitor.read()
     vram = {}
     variants = [v for v in args.variants.split(",") if v]
-    if not args.no_nllb:
-        vram["nllb-600m"] = run_nllb(items, write)
     for name in [m for m in args.models.split(",") if m]:
         try:
             vram[name] = run_llm(name, items, variants, out_dir, write)

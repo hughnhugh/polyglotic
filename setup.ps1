@@ -103,12 +103,65 @@ Install-Packages "Upgrading pip" @("--upgrade", "pip")
 Install-Packages "Installing PyTorch (CUDA build - this is a large download)" `
     @("torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128")
 Install-Packages "Installing core dependencies" `
-    @("faster-whisper", "PyAudioWPatch", "numpy", "opencc-python-reimplemented", "transformers", "sentencepiece", "websockets")
+    @("faster-whisper", "PyAudioWPatch", "numpy", "opencc-python-reimplemented", "websockets")
 Install-Packages "Installing GPU memory readout support (optional)" @("nvidia-ml-py") -required $false
+
+# --- Translator: llama.cpp server + Hy-MT2 model --------------------------
+# Fetched with Windows' built-in curl.exe rather than Python/huggingface_hub:
+# it resumes a partial download (-C -) instead of starting over, which
+# matters for a multi-GB file - huggingface_hub's downloader was observed
+# dropping mid-file on a slow connection and discarding the partial.
+
+$llamaBuild = "b11796"
+$llamaBase = "https://github.com/ggml-org/llama.cpp/releases/download/$llamaBuild"
+$modelUrl = "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/main/Hy-MT2-7B-Q4_K_M.gguf"
+$modelPath = "models\Hy-MT2-7B-Q4_K_M.gguf"
+$modelSize = 4624648896
+
+function Get-Download($url, $dest, $expectedSize = 0) {
+    $part = "$dest.part"
+    for ($attempt = 1; $attempt -le 20; $attempt++) {
+        & curl.exe -L -f -C - --retry 5 --retry-all-errors -o $part $url
+        $have = if (Test-Path $part) { (Get-Item $part).Length } else { 0 }
+        if ($LASTEXITCODE -eq 0 -and ($expectedSize -eq 0 -or $have -eq $expectedSize)) {
+            Move-Item -Force $part $dest
+            return
+        }
+        Write-Warn "Download interrupted ($have bytes so far) - resuming (attempt $attempt)..."
+    }
+    Exit-WithError "Failed downloading $url - re-run this script to resume where it left off."
+}
+
+Write-Step "Checking the GPU driver's CUDA version"
+$cudaLine = (& nvidia-smi 2>$null | Select-String -Pattern "CUDA (UMD )?Version:\s*([0-9]+)\.").Matches
+if ($cudaLine -and [int]$cudaLine[0].Groups[2].Value -lt 13) {
+    Write-Warn "Your NVIDIA driver supports CUDA $($cudaLine[0].Groups[2].Value).x - the translator's llama.cpp build needs CUDA 13 (driver 580 or newer). Update from https://www.nvidia.com/download/index.aspx if translation fails to load."
+}
+
+if (Test-Path "bin\llama-server.exe") {
+    Write-Step "Reusing existing llama.cpp server (bin\)"
+} else {
+    Write-Step "Downloading llama.cpp server ($llamaBuild, CUDA 13)"
+    New-Item -ItemType Directory -Force bin | Out-Null
+    foreach ($zip in @("llama-$llamaBuild-bin-win-cuda-13.4-x64.zip", "cudart-llama-bin-win-cuda-13.4-x64.zip")) {
+        $zipPath = Join-Path $env:TEMP $zip
+        Get-Download "$llamaBase/$zip" $zipPath
+        Expand-Archive -Force -Path $zipPath -DestinationPath bin
+        Remove-Item $zipPath
+    }
+}
+
+if ((Test-Path $modelPath) -and (Get-Item $modelPath).Length -eq $modelSize) {
+    Write-Step "Reusing existing translation model ($modelPath)"
+} else {
+    Write-Step "Downloading the Hy-MT2-7B translation model (4.6GB - resumes if interrupted)"
+    New-Item -ItemType Directory -Force models | Out-Null
+    Get-Download $modelUrl $modelPath $modelSize
+}
 
 Write-Step "Setup complete"
 Write-Host "Run vc-translator with:"
 Write-Host "  .\venv\Scripts\python.exe translate_vc.py"
 Write-Host ""
-Write-Host "First launch downloads the Whisper, NLLB, and VAD models (~5GB total) -"
+Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"
 Write-Host "this only happens once and needs an internet connection."

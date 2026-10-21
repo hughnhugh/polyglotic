@@ -1,11 +1,9 @@
 """
 Live translator for Discord (or any system audio).
 Captures whatever your PC is currently playing (WASAPI loopback) plus your
-mic, detects speech with Silero VAD, and translates it to one or more target
-languages of your choosing (--target). Whisper natively translates any
-language straight into English; for every other target, this pivots through
-a second text-translation model (NLLB-200) since Whisper itself can't
-translate directly into anything but English.
+mic, detects speech with Silero VAD, transcribes it with Whisper, and
+translates it into one or more target languages of your choosing
+(--target) with Hy-MT2, a local translation LLM (see translator.py).
 
 Shows captions in a small always-on-top overlay window, one per target.
 
@@ -15,57 +13,42 @@ Usage:
     python translate_vc.py --target en,vi
 
 A single process handles capture/VAD/transcription once per speech segment
-regardless of how many targets are requested - only the (cheap) translation
-step is repeated per target.
+regardless of how many targets are requested - only the translation step
+is repeated per target.
 """
 
 import argparse
 import re
 import time
 
-import torch
 from opencc import OpenCC
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
 
 import discord_bridge
-from lang_codes import WHISPER_TO_FLORES as LANG_TO_FLORES
-from lang_codes import validate_flores_codes
-from overlay_core import broadcast, is_reliable_transcription, run_translator, status
+import translator
+from lang_codes import TARGET_LANGUAGES
+from overlay_core import is_reliable_transcription, run_translator
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
 
 # Whisper only ever reports "zh" (it doesn't distinguish script) - these are
 # the two script variants selectable as --target, both reachable from a "zh"
-# source without any NLLB translation, just a script conversion.
+# source without any model translation, just a script conversion. Also
+# applied to the translator's output for these targets, so the script is
+# guaranteed rather than left to the model.
 CHINESE_TARGETS = {"zh": _t2s, "zh-hant": _s2t}
-
-NLLB_MODEL = "facebook/nllb-200-distilled-600M"
-
-# Whisper's task="translate" decoder occasionally fails to actually translate
-# and just echoes the source text back instead (sometimes even through a
-# script conversion, e.g. Simplified->Traditional Chinese) rather than
-# producing English. A "translation" that's mostly non-Latin script is that
-# failure, not a real translation - drop it rather than show it as one.
-_NON_LATIN_RE = re.compile(r"[一-鿿㐀-䶿豈-﫿぀-ヿ가-힯Ѐ-ӿ؀-ۿ]")
-
-
-def _looks_translated(text):
-    if not text:
-        return False
-    return len(_NON_LATIN_RE.findall(text)) / len(text) < 0.3
-
 
 _CLAUSE_SPLIT_RE = re.compile(r"[,,。.!!??;;\n]+")
 
 
 def _is_degenerate(text):
-    """NLLB sometimes decodes a short, context-less filler ("Uh-huh.",
-    "Yeah, yeah, yeah.") into a degenerate loop instead of a real
-    translation - either a long run of one repeated character (",,,,,,") or
-    the same short phrase repeated over and over, comma-separated (e.g.
-    "我只是很开心,我只是很开心,我只是很开心,..."). Catch both so they don't
-    get shown as if they were a real translation."""
+    """Guards against a translation that decoded into a degenerate loop
+    instead of a real translation - either a long run of one repeated
+    character (",,,,,,") or the same short phrase repeated over and over,
+    comma-separated (e.g. "我只是很开心,我只是很开心,我只是很开心,...").
+    NLLB did this on short, context-less fillers ("Uh-huh.", "Yeah, yeah,
+    yeah."); Hy-MT2 didn't in evaluation, but an LLM can loop too, so keep
+    catching both rather than show one as if it were a real translation."""
     stripped = text.replace(" ", "")
     if len(stripped) < 6:
         return False
@@ -83,31 +66,6 @@ def _is_degenerate(text):
     return False
 
 
-_nllb_tokenizer = None
-_nllb_model = None
-
-
-def _load_nllb():
-    global _nllb_tokenizer, _nllb_model
-    if _nllb_model is None:
-        status.set("nllb", "Loading...")
-        broadcast(f"Loading translation model ({NLLB_MODEL})...")
-        _nllb_tokenizer = AutoTokenizer.from_pretrained(NLLB_MODEL)
-        _nllb_model = AutoModelForSeq2SeqLM.from_pretrained(NLLB_MODEL).to("cuda").half()
-        status.set("nllb", "Ready")
-    return _nllb_tokenizer, _nllb_model
-
-
-def translate_text(text, src_flores, target_flores):
-    tokenizer, model = _load_nllb()
-    tokenizer.src_lang = src_flores
-    inputs = tokenizer(text, return_tensors="pt").to("cuda")
-    forced_bos_token_id = tokenizer.convert_tokens_to_ids(target_flores)
-    with torch.no_grad():
-        output = model.generate(**inputs, forced_bos_token_id=forced_bos_token_id, max_new_tokens=200)
-    return tokenizer.batch_decode(output, skip_special_tokens=True)[0].strip()
-
-
 def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None):
     q.put({
         "speaker": lead.strip(),
@@ -118,12 +76,12 @@ def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None):
 
 
 def make_process_segment(targets, caption_queues, translation_enabled):
-    """One shared Whisper transcription (and, when needed, one shared
-    Whisper X->English translation) per speech segment, fanned out to every
-    requested target language/overlay - instead of redoing that decode work
-    once per target. translation_enabled: {target: bool}, flipped live by
-    each overlay's "T" button - when off, that target's window shows the
-    native transcription only and skips the translate decode entirely."""
+    """One shared Whisper transcription per speech segment, fanned out to
+    every requested target language/overlay - instead of redoing that
+    decode work once per target. translation_enabled: {target: bool},
+    flipped live by each overlay's "T" button - when off, that target's
+    window shows the native transcription only and skips the translation
+    request entirely."""
 
     def process_segment(model, segment, source_tag="", speaker_hint=None):
         t0 = time.time()
@@ -168,30 +126,8 @@ def make_process_segment(targets, caption_queues, translation_enabled):
         if info.language == "zh":
             native_text = _t2s.convert(native_text)  # normalize display text to Simplified
 
-        en_pivot = {}
-
-        def whisper_translate_to_en():
-            # Whisper's own translate task is a strong, purpose-built X->English
-            # decoder - no need to pivot through NLLB for this common case.
-            # Computed at most once per segment and shared by every target
-            # that needs it (a direct "en" target, or an NLLB pivot for a
-            # source language missing from LANG_TO_FLORES).
-            if "text" not in en_pivot:
-                en_segments, _ = model.transcribe(
-                    segment,
-                    task="translate",
-                    vad_filter=False,
-                    beam_size=5,
-                    language=info.language,
-                    condition_on_previous_text=False,
-                )
-                text = "".join(s.text for s in en_segments).strip()
-                en_pivot["text"] = text if _looks_translated(text) else ""
-            return en_pivot["text"]
-
         for target_lang in targets:
             q = caption_queues[target_lang]
-            target_flores = LANG_TO_FLORES[target_lang]
 
             if info.language == "zh" and target_lang in CHINESE_TARGETS:
                 elapsed = time.time() - t0
@@ -210,32 +146,20 @@ def make_process_segment(targets, caption_queues, translation_enabled):
                 _emit_caption(q, lead, info.language, elapsed, native_text)
                 continue
 
-            if target_lang == "en":
-                translated = whisper_translate_to_en()
-                if not translated:
-                    # Whisper's own translate task occasionally fails outright
-                    # (echoes the source language back instead of translating -
-                    # see _looks_translated) - NLLB is a second, independent
-                    # engine, so try it before giving up on this target entirely.
-                    src_flores = LANG_TO_FLORES.get(info.language)
-                    if src_flores:
-                        translated = translate_text(native_text, src_flores, "eng_Latn")
-            else:
-                src_flores = LANG_TO_FLORES.get(info.language)
-                if src_flores:
-                    translated = translate_text(native_text, src_flores, target_flores)
-                else:
-                    en_text = whisper_translate_to_en()
-                    translated = translate_text(en_text, "eng_Latn", target_flores) if en_text else ""
+            # Every target, English included, goes through the translator -
+            # it replaced Whisper's own X->English translate task too, which
+            # occasionally invented content (see translator.py).
+            translated = translator.translate(native_text, info.language, target_lang)
+            if target_lang in CHINESE_TARGETS:
+                translated = CHINESE_TARGETS[target_lang].convert(translated)
 
             elapsed = time.time() - t0
-            # The translate pass is a separate decode from the transcribe pass
-            # above and isn't reliability-checked itself - it occasionally comes
-            # back empty, or for a short/context-less filler NLLB can degenerate
-            # into a run of one repeated character, even though the native
-            # transcription was solid. Show the native text either way rather
-            # than silently dropping the caption or showing that as if it were
-            # a translation.
+            # The translation isn't reliability-checked like the transcription
+            # above - it can come back empty (translator still loading, or a
+            # failed request) or, rarely, as a degenerate loop, even though
+            # the native transcription was solid. Show the native text either
+            # way rather than silently dropping the caption or showing that as
+            # if it were a translation.
             if _is_degenerate(translated):
                 translated = ""
             _emit_caption(q, lead, info.language, elapsed, native_text, translated or None)
@@ -248,7 +172,7 @@ def main():
     parser.add_argument(
         "--target", "-t", default=None,
         help="Comma-separated target language code(s), e.g. 'en,vi'. One shared audio/transcription "
-             f"pipeline is used, with one overlay window per target. Supported: {', '.join(sorted(LANG_TO_FLORES))} "
+             f"pipeline is used, with one overlay window per target. Supported: {', '.join(sorted(TARGET_LANGUAGES))} "
              "(default: shows a GUI picker for this and the other options below)",
     )
     parser.add_argument(
@@ -277,20 +201,14 @@ def main():
     show_settings = True
     initial_targets = list(dict.fromkeys(t.strip().lower() for t in (args.target or "en").split(",") if t.strip()))
     for target in initial_targets:
-        if target not in LANG_TO_FLORES:
-            raise SystemExit(f"Unsupported target language '{target}'. Supported: {', '.join(sorted(LANG_TO_FLORES))}")
+        if target not in TARGET_LANGUAGES:
+            raise SystemExit(f"Unsupported target language '{target}'. Supported: {', '.join(sorted(TARGET_LANGUAGES))}")
 
-    # Targets are now addable live from Settings at any time, not just at
-    # startup - NLLB has to be ready (and bad flores codes dropped) upfront
-    # regardless of what's initially requested, not just when a non-English
-    # target happens to be there on launch.
-    tokenizer, _ = _load_nllb()
-    bad_codes = validate_flores_codes(tokenizer, LANG_TO_FLORES)
-    if bad_codes:
-        print(f"Warning: dropping unrecognized NLLB codes: {sorted(bad_codes)}")
-    for target in initial_targets:
-        if target not in LANG_TO_FLORES:
-            raise SystemExit(f"Target '{target}' was dropped as an unrecognized NLLB code.")
+    # Targets are addable live from Settings at any time, not just at
+    # startup - so the translator loads regardless of what's initially
+    # requested. In the background: the window comes up immediately, with
+    # the load tracked in its status panel.
+    translator.start()
 
     model_size = args.model or "large-v3"
 

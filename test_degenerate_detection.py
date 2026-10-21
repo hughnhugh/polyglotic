@@ -1,8 +1,9 @@
-"""Regression test for _is_degenerate() - NLLB occasionally decodes a
-short, context-less filler into a degenerate loop instead of a real
-translation, either a repeated single character or (the bug this guards
-against) the same short phrase repeated over and over. Pure text logic,
-no GPU/Whisper/NLLB needed."""
+"""Regression test for _is_degenerate() - the guard against a translation
+that decoded into a degenerate loop instead of a real translation, either
+a repeated single character or (the bug this guards against) the same
+short phrase repeated over and over. The cases below are real output from
+NLLB, the app's previous translator. Pure text logic, no GPU/Whisper/
+translator needed."""
 
 from translate_vc import _is_degenerate
 

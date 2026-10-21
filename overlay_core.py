@@ -247,7 +247,7 @@ def broadcast(msg):
 STATUS_FIELDS = [
     ("vad", "VAD"),
     ("whisper_model", "Whisper model"),
-    ("nllb", "Translation (NLLB)"),
+    ("translator", "Translation (Hy-MT2)"),
     ("gpu", "GPU memory"),
     ("loopback", "System audio"),
     ("mic", "Microphone"),
@@ -256,7 +256,7 @@ STATUS_FIELDS = [
 
 
 class SystemStatus:
-    """Structured per-subsystem status (VAD/Whisper/NLLB/audio devices/
+    """Structured per-subsystem status (VAD/Whisper/translator/audio devices/
     Discord bridge), mirrored into the Settings window as a small table
     instead of a single rolling status line. set() is called from whichever
     thread owns that subsystem (the audio worker thread, the model-reload
