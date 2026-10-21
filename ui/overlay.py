@@ -27,8 +27,11 @@ PAD = 14
 FADE_STEP = 0.08          # per 30ms tick - about a third of a second to fade
 HISTORY = 150             # captions an overlay keeps to scroll back through
 BASE_PRIMARY_PX = 22
-BASE_SECONDARY_PX = 15
+BASE_SECONDARY_PX = 18    # the original - big enough to read at a glance, not to compete
 BASE_SPEAKER_PX = 13
+# The original speech under a translation, in classic subtitle yellow - set
+# apart from the white translation, and easy to pick out.
+ORIGINAL_COLOR = "#ffd76e"
 
 
 class OutlinedText(QWidget):
@@ -145,7 +148,7 @@ class CaptionBlock(QWidget):
         show_original = prefs["show_original"] and bool(original)
         self.secondary.setVisible(show_original)
         if show_original:
-            self.secondary.set(original, _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Normal), "#d3d8e2",
+            self.secondary.set(original, _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium), ORIGINAL_COLOR,
                                1.6 * scale)
 
 

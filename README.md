@@ -90,7 +90,7 @@ changing things and reading back. Closing it keeps the app running in the
 
 One per language you translate into, centred near the bottom of the screen
 to start with. Captions run newest at the bottom: the translation large,
-the original speech small underneath, and who said it in their own colour
+the original speech underneath in subtitle yellow, and who said it in their own colour
 (names come from the Discord plugin; your own speech shows as "You").
 Text has a dark outline, like film subtitles, so it stays readable over
 bright scenes even with the background panel turned right down. A caption
