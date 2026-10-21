@@ -253,7 +253,8 @@ def first_reply_start(user_id, after, before):
 
 
 def channel_names(heard_within_sec=600):
-    """Display names of the people in your voice channel: everyone in the
+    """Display names of the people in your voice channel, most recently
+    heard first: everyone in the
     plugin's last member list, plus anyone heard speaking in the last
     heard_within_sec (the member list only refreshes when the plugin
     re-sends it, so this also catches people who joined since, and lets
@@ -264,7 +265,10 @@ def channel_names(heard_within_sec=600):
             return []
         cutoff = time.time() - heard_within_sec
         ids = set(_members) | {uid for uid, ts in _last_heard.items() if ts >= cutoff}
-        return sorted({_names[uid] for uid in ids if uid in _names}, key=str.lower)
+        # Most recently heard first, so a cap on how many get used keeps the
+        # people actually talking.
+        ordered = sorted(ids, key=lambda uid: (-_last_heard.get(uid, 0.0), _names.get(uid, "").lower()))
+        return list(dict.fromkeys(_names[uid] for uid in ordered if uid in _names))
 
 
 def is_active() -> bool:

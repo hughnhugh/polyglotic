@@ -67,6 +67,21 @@ def _is_degenerate(text):
     return False
 
 
+def _echoes_context(text, context):
+    """True if a transcription is just the context words read back - the
+    speech model echoing its prompt for a short or unclear clip ("Caleb,
+    CrèmeBrûlée, JuGGerNauT, kaektus, marina, ..." as someone's caption)
+    rather than what was said: three or more of the context's entries in
+    it, or two making up most of it. Someone saying a single name still
+    gets through."""
+    lowered = text.lower()
+    hits = [w for w in (w.strip().lower() for w in context.split(",")) if len(w) >= 2 and w in lowered]
+    if len(hits) >= 3:
+        return True
+    covered = sum(len(w) for w in hits)
+    return len(hits) == 2 and covered >= 0.6 * len(lowered.replace(" ", "").replace(",", ""))
+
+
 def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False, absorb=(),
                   speech_end=None, live_section=0):
     q.put({
@@ -140,6 +155,10 @@ def make_process_segment(targets, caption_queues, translation_enabled):
         if not native_text:
             if source_tag != "mic":
                 print(f"[debug] transcription came back empty (source={source_tag!r} speaker_hint={speaker_hint})")
+            return
+        if options["initial_prompt"] and _echoes_context(native_text, options["initial_prompt"]):
+            print(f"[debug] dropped a transcription echoing the context words (speaker_hint={speaker_hint}): "
+                  f"{native_text!r}")
             return
 
         if source_tag == "mic":

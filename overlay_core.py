@@ -112,13 +112,25 @@ def _join_text(pieces):
     return out
 
 
+# At most this many channel names go into the speech model's context. A
+# long list of names - several of them display names nobody says out loud
+# - makes the model more likely to echo the list back as the
+# "transcription" of a short or unclear clip (see translate_vc's
+# _echoes_context, which catches that).
+MAX_CONTEXT_NAMES = 12
+
+
 def _speakable_name(name):
     """A Discord display name cut down to something a speech model could
     actually hear said - emoji and decoration stripped - or None if
-    nothing name-like is left ("?", "🍁🍁") or it's too long to be what
-    anyone calls them out loud."""
+    nothing name-like is left ("?", "🍁🍁") or it reads more like a status
+    than what anyone calls them out loud: over two words or 16 characters
+    ("silly student try hard"), or a Chinese name over 4 characters
+    ("蟹黄宝神秘配方")."""
     cleaned = " ".join("".join(c if c.isalnum() or c in " '-" else " " for c in name).split())
-    if not any(c.isalpha() for c in cleaned) or len(cleaned) > 24:
+    if not any(c.isalpha() for c in cleaned) or len(cleaned) > 16 or len(cleaned.split()) > 2:
+        return None
+    if all("⺀" <= c <= "鿿" for c in cleaned) and len(cleaned) > 4:
         return None
     return cleaned
 
@@ -131,11 +143,13 @@ def speech_context():
     words = [w.strip() for w in speech_options["context"].split(",") if w.strip()]
     if speech_options["auto_names"]:
         seen = {w.lower() for w in words}
+        added = 0
         for name in discord_bridge.channel_names():
             name = _speakable_name(name)
-            if name and name.lower() not in seen:
+            if name and name.lower() not in seen and added < MAX_CONTEXT_NAMES:
                 seen.add(name.lower())
                 words.append(name)
+                added += 1
     return ", ".join(words)
 
 MAX_HISTORY = 300                # cap on stored caption entries so the log doesn't grow unbounded

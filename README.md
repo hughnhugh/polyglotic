@@ -109,8 +109,11 @@ left it; command-line options override it for that run.
   of the people in your voice channel are added automatically, following
   people joining and leaving - the line under it shows exactly what the
   speech model is being given. Emoji and decorations are stripped from
-  names, and ones nobody would say out loud (just symbols, or very long)
-  are left out.
+  names, ones that read more like a status than a name (just symbols,
+  over two words or 16 characters, Chinese over 4 characters) are left
+  out, and at most 12 are used, most recent speakers first. Given a short
+  or unclear clip, the speech model sometimes "transcribes" the list
+  itself - a caption that's just names read back is dropped.
 
 The Settings window always starts visible right now (whether or not you
 pass `--target`) - it's meant to stay hidden for scripted `--target`
