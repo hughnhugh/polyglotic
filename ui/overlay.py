@@ -104,10 +104,42 @@ class OutlinedText(QWidget):
         p.fillPath(path, self._color)
 
 
-def _caption_font(px, weight):
+# Chinese/Japanese characters pack far more strokes into each glyph, so
+# at the same pixel size they read as smaller and denser than Latin text -
+# subtitles in those scripts are set larger. Text that's mostly CJK gets
+# this much more size, in the font drawn for its script.
+CJK_SCALE = 1.18
+CJK_FAMILIES = {
+    "simplified": ["Microsoft YaHei UI", "Microsoft YaHei"],
+    "traditional": ["Microsoft JhengHei UI", "Microsoft JhengHei"],
+    "japanese": ["Yu Gothic UI", "Meiryo UI"],
+}
+SCRIPT_OF_LANGUAGE = {"zh": "simplified", "zh-hant": "traditional", "yue": "traditional", "ja": "japanese"}
+
+
+def _cjk_share(text):
+    letters = [c for c in text if not c.isspace()]
+    return sum("\u2e80" <= c <= "\u9fff" or "\uf900" <= c <= "\ufaff" for c in letters) / len(letters) if letters else 0
+
+
+def _caption_font(px, weight, text="", lang=None):
+    """The caption font for `text` in language `lang`: the Latin caption
+    families, with the right CJK font first in line for Chinese/Japanese
+    (YaHei's glyphs for Simplified, JhengHei's for Traditional/Cantonese)
+    - and mostly-CJK text set CJK_SCALE larger."""
+    script = SCRIPT_OF_LANGUAGE.get(lang)
+    cjk = _cjk_share(text) > 0.3
+    if cjk and script is None:
+        script = "simplified"
+    families = list(theme.CAPTION_FAMILIES)
+    if cjk:
+        # First, not just ahead of the other fallbacks: Qt caches a font's
+        # CJK fallback by its first family, so Simplified and Traditional
+        # behind the same Latin face would share whichever loaded first.
+        families = CJK_FAMILIES[script] + families
     font = QFont()
-    font.setFamilies(theme.CAPTION_FAMILIES)
-    font.setPixelSize(max(8, round(px)))
+    font.setFamilies(families)
+    font.setPixelSize(max(8, round(px * (CJK_SCALE if cjk else 1.0))))
     font.setWeight(weight)
     return font
 
@@ -143,12 +175,14 @@ class CaptionBlock(QWidget):
         if caption.live:
             color.setAlphaF(0.85)
         self.primary.set(primary + (" \u2026" if caption.live else ""),
-                         _caption_font(BASE_PRIMARY_PX * scale, QFont.Weight.Medium), color, 1.9 * scale)
+                         _caption_font(BASE_PRIMARY_PX * scale, QFont.Weight.Medium, primary,
+                                       target if original else caption.lang), color, 1.9 * scale)
 
         show_original = prefs["show_original"] and bool(original)
         self.secondary.setVisible(show_original)
         if show_original:
-            self.secondary.set(original, _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium), ORIGINAL_COLOR,
+            self.secondary.set(original, _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium, original,
+                                                       caption.lang), ORIGINAL_COLOR,
                                1.6 * scale)
 
 
