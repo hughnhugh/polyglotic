@@ -20,6 +20,12 @@ from websockets.asyncio.server import serve
 DEFAULT_PORT = 8765
 ACTIVE_TIMEOUT_SEC = 10   # no messages for this long -> treat the bridge as inactive
 INTERVAL_WINDOW_SEC = 30  # how far back to retain speaking intervals
+# Everyone's voice arrives mixed into one loopback stream, so two users'
+# overlapping intervals slice out the same audio - e.g. someone's open mic
+# or a noise during another person's sentence. An interval at least this
+# much covered by another user's is skipped rather than captioned twice;
+# its audio is already in the other user's segment.
+OVERLAP_SKIP_FRAC = 0.8
 
 _lock = threading.Lock()
 _names: dict = {}
@@ -74,15 +80,36 @@ def _handle_message(msg):
             for iv in reversed(_intervals):
                 if iv["user_id"] == user_id and iv["end"] is None:
                     iv["end"] = ts
+                    iv["covered_by"] = _covering_user_locked(iv)
                     _closed_intervals_q.put({
                         "user_id": user_id,
                         "username": _names.get(user_id, f"User_{user_id}"),
                         "start": iv["start"],
                         "end": ts,
+                        "covered_by": iv["covered_by"],
                     })
                     break
 
         _prune_locked()
+
+
+def _covering_user_locked(iv):
+    """Username of another user whose interval (still open, or closed and
+    captioned rather than itself skipped) overlaps at least
+    OVERLAP_SKIP_FRAC of iv, or None. Of two near-identical intervals, the
+    first to close is skipped while the other is still open, and the other
+    is then captioned."""
+    duration = iv["end"] - iv["start"]
+    if duration <= 0:
+        return None
+    for other in _intervals:
+        if other["user_id"] == iv["user_id"] or other.get("covered_by"):
+            continue
+        other_end = other["end"] if other["end"] is not None else iv["end"]
+        overlap = min(iv["end"], other_end) - max(iv["start"], other["start"])
+        if overlap >= OVERLAP_SKIP_FRAC * duration:
+            return _names.get(other["user_id"], f"User_{other['user_id']}")
+    return None
 
 
 async def _handler(websocket):

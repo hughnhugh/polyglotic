@@ -93,8 +93,65 @@ def test_runaway_interval_is_capped():
     print(f"OK: 12s interval capped to {len(segment)/SR:.2f}s (MAX_SEGMENT_SEC={overlay_core.MAX_SEGMENT_SEC}s)")
 
 
+def _speak(user_id, username, start_ts, end_ts=None):
+    discord_bridge._handle_message({"event": "speaking_start", "userId": user_id, "username": username, "ts": start_ts * 1000})
+    if end_ts is not None:
+        discord_bridge._handle_message({"event": "speaking_stop", "userId": user_id, "ts": end_ts * 1000})
+
+
+def _stop(user_id, end_ts):
+    discord_bridge._handle_message({"event": "speaking_stop", "userId": user_id, "ts": end_ts * 1000})
+
+
+def test_noise_during_speech_neither_cuts_nor_duplicates():
+    # Someone's short noise mid-sentence: the speaker's interval stays open
+    # (intervals are per user), so their sentence is captioned whole once,
+    # and the noise-maker's slice - the same mixed audio - is skipped.
+    discord_bridge._intervals.clear()
+    buffer, t0 = _make_buffer(seconds=5.0)
+    _speak("1", "Arthur", t0 + 0.2)
+    _speak("2", "Ford", t0 + 1.5, t0 + 2.1)
+    _stop("1", t0 + 4.2)
+
+    calls = _run_drain(buffer)
+    assert [c[3][1] for c in calls] == ["Arthur"], f"expected only Arthur's segment, got {[c[3] for c in calls]}"
+    assert len(calls[0][1]) >= int(4.0 * SR), f"Arthur's segment was cut short: {len(calls[0][1]) / SR:.2f}s"
+    print(f"OK: noise mid-sentence skipped, speaker's {len(calls[0][1]) / SR:.2f}s segment intact")
+
+
+def test_near_identical_intervals_captioned_once():
+    # Two users flagged speaking over the same span (e.g. one's mic picking
+    # up the other) - the same audio would otherwise be captioned twice.
+    discord_bridge._intervals.clear()
+    buffer, t0 = _make_buffer(seconds=3.0)
+    _speak("3", "Caleb", t0 + 0.30)
+    _speak("4", "Resul", t0 + 0.35)
+    _stop("3", t0 + 1.80)
+    _stop("4", t0 + 1.85)
+
+    calls = _run_drain(buffer)
+    assert len(calls) == 1, f"expected one segment, got {[c[3] for c in calls]}"
+    print(f"OK: near-identical intervals captioned once (as {calls[0][3][1]})")
+
+
+def test_back_and_forth_keeps_both():
+    # A reply that starts just before the previous speaker stops is mostly
+    # its own audio - both get captioned.
+    discord_bridge._intervals.clear()
+    buffer, t0 = _make_buffer(seconds=4.0)
+    _speak("5", "Trillian", t0 + 0.2, t0 + 1.5)
+    _speak("6", "Zaphod", t0 + 1.3, t0 + 3.0)
+
+    calls = _run_drain(buffer)
+    assert [c[3][1] for c in calls] == ["Trillian", "Zaphod"], f"got {[c[3] for c in calls]}"
+    print("OK: overlapping turn-taking keeps both speakers")
+
+
 if __name__ == "__main__":
     test_speaking_interval_cuts_expected_segment()
     test_short_interval_is_dropped()
     test_runaway_interval_is_capped()
+    test_noise_during_speech_neither_cuts_nor_duplicates()
+    test_near_identical_intervals_captioned_once()
+    test_back_and_forth_keeps_both()
     print("ALL OK")

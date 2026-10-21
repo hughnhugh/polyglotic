@@ -413,6 +413,12 @@ def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_
         duration = closed["end"] - closed["start"]
         if duration < MIN_SPEECH_SEC:
             continue
+        if closed.get("covered_by"):
+            # Same mixed audio as another user's segment - see
+            # discord_bridge.OVERLAP_SKIP_FRAC.
+            print(f"[debug] skipped {closed['username']}'s {duration:.1f}s interval - "
+                  f"overlaps {closed['covered_by']}'s")
+            continue
         start = max(closed["start"], closed["end"] - MAX_SEGMENT_SEC)  # cap runaway segments
         segment = _slice_timestamped_buffer(timestamped_buffer, start, closed["end"])
         if segment is None or len(segment) < int(MIN_SPEECH_SEC * VAD_SAMPLE_RATE):
