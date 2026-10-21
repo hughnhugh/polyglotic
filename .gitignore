@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 *.log
 logs/
+eval/bin/
+eval/results/
+eval/models/
