@@ -32,7 +32,14 @@ DEFAULTS = {
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES
     "context": "",          # names/slang passed to the speech model to bias its spelling
     "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
+    "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
+    "translate_live": True, # translate live updates too, not just each pause's final caption
 }
+
+# Live update interval: the dropdown's suggestions; any value in this range
+# can be typed in too.
+LIVE_INTERVAL_CHOICES = [0.5, 0.75, 1, 1.25, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]
+LIVE_INTERVAL_RANGE = (0.5, 20.0)
 
 # Settings' "Conversation language" choices: code -> label. Forcing one
 # skips the speech model's language detection - no more misreads of short

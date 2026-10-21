@@ -13,7 +13,7 @@ import torch
 
 import settings
 from lang_codes import LANGUAGE_NAMES
-from overlay_core import STATUS_FIELDS, speech_context, speech_options
+from overlay_core import STATUS_FIELDS, live_options, speech_context, speech_options
 from overlay_core import status as system_status
 
 # torch.cuda.memory_*() only tracks memory PyTorch's own allocator claimed -
@@ -57,7 +57,7 @@ class SettingsWindow:
         )
 
         root.configure(bg=BG)
-        root.geometry("520x760")
+        root.geometry("520x830")
         root.minsize(420, 480)
 
         def section(text):
@@ -133,6 +133,24 @@ class SettingsWindow:
             selectcolor="#333333", activebackground=BG, activeforeground=FG, font=("Segoe UI", 9),
             command=self._on_auto_names_toggle,
         ).pack(anchor="w", padx=12)
+        live_frame = tk.Frame(root, bg=BG)
+        live_frame.pack(fill="x", padx=12, pady=(6, 0))
+        tk.Label(live_frame, text="Live caption updates every", fg=FG, bg=BG, font=("Segoe UI", 9)).pack(side="left")
+        self.live_interval_var = tk.StringVar(value=self._format_interval(live_options["interval"]))
+        # Editable: pick a suggestion or type any number of seconds in range.
+        live_combo = ttk.Combobox(live_frame, textvariable=self.live_interval_var, width=6,
+                                  values=["Off"] + [self._format_interval(v) for v in settings.LIVE_INTERVAL_CHOICES])
+        live_combo.pack(side="left", padx=6)
+        for event in ("<<ComboboxSelected>>", "<Return>", "<FocusOut>"):
+            live_combo.bind(event, self._on_live_interval_changed)
+        tk.Label(live_frame, text="seconds", fg=FG, bg=BG, font=("Segoe UI", 9)).pack(side="left")
+        self.translate_live_var = tk.BooleanVar(value=live_options["translate"])
+        tk.Checkbutton(
+            live_frame, text="translate them too", variable=self.translate_live_var, fg=FG, bg=BG,
+            selectcolor="#333333", activebackground=BG, activeforeground=FG, font=("Segoe UI", 9),
+            command=self._on_translate_live_toggle,
+        ).pack(side="left", padx=(10, 0))
+
         # What the speech model is actually being given, names included -
         # refreshed by _poll_status as people join, leave or speak.
         self.context_shown = tk.Label(root, text="", fg="#808080", bg=BG, font=("Segoe UI", 8), anchor="w",
@@ -233,6 +251,34 @@ class SettingsWindow:
         speech_options["context"] = context
         settings.update(context=context)
         self.status_label.config(text="Names & slang applied." if context else "Names & slang cleared.")
+
+    @staticmethod
+    def _format_interval(seconds):
+        return "Off" if seconds is None else f"{seconds:g}"
+
+    def _on_live_interval_changed(self, event=None):
+        text = self.live_interval_var.get().strip().lower().removesuffix("s").strip()
+        if text in ("off", "0", ""):
+            seconds = None
+        else:
+            try:
+                seconds = float(text)
+            except ValueError:
+                self.live_interval_var.set(self._format_interval(live_options["interval"]))
+                self.status_label.config(text="Live caption interval must be a number of seconds, or Off.")
+                return
+            lo, hi = settings.LIVE_INTERVAL_RANGE
+            seconds = min(max(seconds, lo), hi)
+        self.live_interval_var.set(self._format_interval(seconds))
+        if seconds != live_options["interval"]:
+            live_options["interval"] = seconds
+            settings.update(live_interval=seconds)
+            self.status_label.config(text="Live captions off - captions appear when each speaker pauses."
+                                     if seconds is None else f"Live captions update every {seconds:g}s.")
+
+    def _on_translate_live_toggle(self):
+        live_options["translate"] = self.translate_live_var.get()
+        settings.update(translate_live=live_options["translate"])
 
     def _on_auto_names_toggle(self):
         speech_options["auto_names"] = self.auto_names_var.get()

@@ -3,6 +3,7 @@
 through discord_bridge's real message-handling path, with synthetic
 timestamped audio - no GPU/Whisper/real Discord call needed."""
 
+import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,7 @@ def _run_drain(buffer):
 
 
 def _reset():
+    overlay_core.live_options.update(interval=1.5, translate=True)
     discord_bridge._intervals.clear()
     overlay_core._runs.clear()
     overlay_core._live_intervals.clear()
@@ -86,7 +88,7 @@ def test_short_interval_is_dropped():
 
 def test_long_interval_transcribed_whole():
     # Up to BRIDGE_FINAL_MAX_SEC, a closed interval is transcribed in one
-    # piece - no longer cut down to its last MAX_SEGMENT_SEC.
+    # piece.
     _reset()
     buffer, t0 = _make_buffer(seconds=12.0)
     discord_bridge._handle_message({"event": "speaking_start", "userId": "7", "username": "Marvin", "ts": t0 * 1000})
@@ -99,7 +101,7 @@ def test_long_interval_transcribed_whole():
 
 
 def test_live_captions_then_final_replaces_them():
-    # Still speaking after MAX_SEGMENT_SEC -> a live caption; once they stop,
+    # Still speaking -> a live caption of everything so far; once they stop,
     # the whole interval again, in the same caption group, marked final.
     _reset()
     now = time.time()
@@ -109,7 +111,7 @@ def test_live_captions_then_final_replaces_them():
     live = _run_drain(buffer)
     assert len(live) == 1 and live[0][4]["final"] is False and live[0][4]["caption_group"], live
     group = live[0][4]["caption_group"]
-    assert _run_drain(buffer) == [], "a second live cut came before another MAX_SEGMENT_SEC passed"
+    assert _run_drain(buffer) == [], "a second live update came before the interval passed"
 
     _stop("8", now)
     final = _run_drain(buffer)
@@ -247,21 +249,22 @@ def test_join_absorbs_live_captions():
 def test_open_mic_cannot_cover_everyone():
     # Someone's mic held "speaking" by background noise for minutes: other
     # people's speech inside it must still be captioned, not skipped as
-    # covered by it - and the open-mic interval's live pieces, mostly their
-    # speech, are skipped instead.
+    # covered by it - and the open mic's 20s stretch, largely their speech,
+    # isn't finalized under its name.
     _reset()
     now = time.time()
     buffer, _ = _make_buffer(seconds=24.0, start_ts=now - 24.0)
     _speak("20", "OpenMic", now - 24.0)            # still open, 24s and counting
-    _speak("21", "Ford", now - 9.0, now - 4.0)
+    _speak("21", "Ford", now - 15.0, now - 9.0)
+    _speak("23", "Zaphod", now - 8.0, now - 2.0)
 
     calls = _run_drain(buffer)
-    speakers = [c[3][1] for c in calls]
-    assert "Ford" in speakers, f"Ford's speech was skipped as covered by the open mic: {speakers}"
-    assert "OpenMic" not in speakers or all(c[4]["final"] is False for c in calls if c[3][1] == "OpenMic")
-    print(f"OK: open mic for 24s doesn't swallow Ford's caption ({speakers})")
+    speakers = [c[3][1] for c in calls if c[1] is not None]
+    assert "Ford" in speakers and "Zaphod" in speakers, f"speech skipped as covered by the open mic: {speakers}"
+    assert "OpenMic" not in speakers, f"open mic's stretch captioned under its name: {speakers}"
+    print(f"OK: open mic for 24s doesn't swallow anyone's caption, nor get one of theirs ({speakers})")
 
-    # A live piece of the open mic made mostly of someone else's speech is skipped.
+    # A live update for the open mic made mostly of someone else's speech is skipped.
     _reset()
     now = time.time()
     buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
@@ -269,7 +272,7 @@ def test_open_mic_cannot_cover_everyone():
     _speak("21", "Ford", now - 6.5)
     calls = _run_drain(buffer)
     assert [c[3][1] for c in calls] == ["Ford"], [c[3] for c in calls]
-    print("OK: live piece that's mostly someone else's speech skipped")
+    print("OK: live update that's mostly someone else's speech skipped")
 
 
 def test_join_blocked_by_reply_in_gap():
@@ -301,6 +304,56 @@ def test_reply_at_the_end_is_trimmed_off():
     print(f"OK: Arthur's final trimmed to {len(arthur[0][1]) / SR:.2f}s, leaving out Ford's reply")
 
 
+def test_live_caption_grows_and_rolls_over():
+    # Each live update covers everything since the caption started; at
+    # BRIDGE_FINAL_MAX_SEC what's there is finalized and a new caption
+    # starts. With live updates off there are none, only the final.
+    _reset()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=26.0, start_ts=now - 26.0)
+    _speak("30", "Marvin", now - 21.0)
+    calls = _run_drain(buffer)
+    assert len(calls) == 1 and calls[0][4]["final"] is True and len(calls[0][1]) / SR >= 20.5, calls
+    first_group = calls[0][4]["caption_group"]
+    live = overlay_core._live_intervals[("30", now - 21.0)]
+    live["last_update"] -= 2.0  # as if 2s had passed since the rollover
+    live["seg_start"] -= 2.0
+    live["section_start"] -= 2.0
+    calls = _run_drain(buffer)
+    assert len(calls) == 1 and calls[0][4]["final"] is False and calls[0][4]["caption_group"] != first_group, calls
+    assert 1.9 <= len(calls[0][1]) / SR <= 2.7, len(calls[0][1]) / SR
+    print("OK: 21s of speech -> first 20s finalized, a new live caption carries on from there")
+
+    _reset()
+    overlay_core.live_options["interval"] = None
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=8.0, start_ts=now - 8.0)
+    _speak("31", "Trillian", now - 6.0)
+    assert _run_drain(buffer) == [], "live update with live captions off"
+    _stop("31", now)
+    calls = _run_drain(buffer)
+    assert len(calls) == 1 and calls[0][4]["final"] is True
+    print("OK: live captions off -> only the final caption")
+
+
+def test_segment_executor_latest_wins():
+    ran, gate = [], threading.Event()
+    ex = overlay_core.SegmentExecutor()
+    ex.submit(lambda: gate.wait(5))  # hold the worker so the rest queue up
+    ex.submit_live(("g1", 0), lambda: ran.append("g1 v1"))
+    ex.submit_live(("g1", 0), lambda: ran.append("g1 v2"))
+    ex.submit_live(("g2", 0), lambda: ran.append("g2 live"))
+    ex.submit(lambda **kw: ran.append("g2 final"), caption_group="g2")
+    ex.submit(lambda: ran.append("other"))
+    gate.set()
+    deadline = time.time() + 5
+    while len(ran) < 3 and time.time() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.1)
+    assert ran == ["g2 final", "other", "g1 v2"], ran
+    print("OK: executor runs finals first, only the newest live update, none superseded by a final")
+
+
 if __name__ == "__main__":
     test_speaking_interval_cuts_expected_segment()
     test_short_interval_is_dropped()
@@ -316,4 +369,6 @@ if __name__ == "__main__":
     test_open_mic_cannot_cover_everyone()
     test_join_blocked_by_reply_in_gap()
     test_reply_at_the_end_is_trimmed_off()
+    test_live_caption_grows_and_rolls_over()
+    test_segment_executor_latest_wins()
     print("ALL OK")

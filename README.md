@@ -137,15 +137,31 @@ your mic in Discord itself. Have Discord (or whatever app) playing audio
 through your default output device — your microphone is captured too,
 tagged `[You]`, unless toggled off.
 
-**How captions update:** while someone keeps talking, a live caption
-(marked `…`) appears every 6 seconds; when they pause, the whole stretch
-(up to 20s) is transcribed again in one go and replaces those live pieces
-in place. If the same person carries on within 2 seconds, with nobody else
-captioned in between, their new speech is joined onto the previous caption
-and the whole run re-transcribed and re-translated as one. The time in each
-caption's `[lang, 1.2s]` tag is the delay from the end of the speech to the
-caption appearing - waiting and processing included (the log files also
-record processing time alone as `proc`).
+**How captions update:** while someone's talking, their caption appears
+live (marked `…`) and grows as they go - every 1.5 seconds by default,
+what they've said is transcribed again and the caption updates in place,
+extending and correcting itself as more context arrives. When they pause,
+the whole stretch is transcribed once more in one go and replaces it. If
+the same person carries on within 2 seconds, with nobody else captioned in
+between, their new speech is joined onto that caption and the whole run
+re-transcribed and re-translated as one. Speech running over 20 seconds
+without a pause is captioned in 20-second pieces.
+
+Settings' **"Live caption updates every"** box sets the update interval:
+pick a suggestion or type any number of seconds from 0.5 to 20, or `Off`
+for no live captions (each appears only once the speaker pauses). Shorter
+feels more live but uses more GPU time; it can't build a backlog, though -
+when the GPU's busy, waiting live updates are replaced by newer ones rather
+than queued, and captions finishing a pause always go first. **"translate
+them too"** (on by default) translates live updates as well; off, they show
+the original text and translate on the pause. Long live captions grow in
+6-second sections, so each update stays quick (transcription time grows
+with the audio: ~0.35s for 1.5s of speech, ~1.1s for 6s, ~3.5s for 20s).
+
+The time in each caption's `[lang, 1.2s]` tag is the delay from the end of
+the speech to the caption appearing - waiting and processing included.
+Only final captions are written to the log files, with how many live
+updates each had (`live x3`) and processing time alone (`proc`).
 
 ### Options
 

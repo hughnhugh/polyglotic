@@ -27,7 +27,7 @@ import discord_bridge
 import translator
 from lang_codes import TARGET_LANGUAGES
 import settings
-from overlay_core import is_reliable_transcription, run_translator, speech_context, speech_options
+from overlay_core import is_reliable_transcription, live_options, run_translator, speech_context, speech_options
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
@@ -68,7 +68,7 @@ def _is_degenerate(text):
 
 
 def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False, absorb=(),
-                  speech_end=None):
+                  speech_end=None, live_section=0):
     q.put({
         "speaker": lead.strip(),
         "lang": lang,
@@ -80,6 +80,7 @@ def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, gro
         "group": group,
         "final": final,
         "absorb": list(absorb),
+        "live_section": live_section,
     })
 
 
@@ -92,7 +93,7 @@ def make_process_segment(targets, caption_queues, translation_enabled):
     request entirely."""
 
     def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False,
-                        absorb=(), speech_end=None):
+                        absorb=(), speech_end=None, live_section=0):
         """caption_group/final: a long Discord interval's live captions
         (final=False) share a group, and its final caption (final=True)
         replaces them in each overlay - see overlay_core.BRIDGE_FINAL_MAX_SEC.
@@ -101,7 +102,9 @@ def make_process_segment(targets, caption_queues, translation_enabled):
         overlay_core.BRIDGE_JOIN_GAP_SEC). segment None with a group just
         removes that group's live captions. If the final pass yields
         nothing usable the earlier captions stay. speech_end: when the
-        speech ended, for the overlay's end-to-end delay readout."""
+        speech ended, for the overlay's end-to-end delay readout.
+        live_section: which section of its growing live caption a live
+        update is (see overlay_core.LIVE_SECTION_SEC)."""
         if caption_group and final and segment is None:
             for q in caption_queues.values():
                 q.put({"group": caption_group, "final": True, "native": None})
@@ -159,18 +162,19 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             if info.language == "zh" and target_lang in CHINESE_TARGETS:
                 elapsed = time.time() - t0
                 shown = CHINESE_TARGETS[target_lang].convert(native_text)
-                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final, absorb, speech_end)
+                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final, absorb, speech_end, live_section)
                 continue
 
             if info.language == target_lang:
                 # already the target language - nothing to translate
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end, live_section)
                 continue
 
-            if not translation_enabled.get(target_lang, True):
+            if not translation_enabled.get(target_lang, True) or (caption_group and not final
+                                                                  and not live_options["translate"]):
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end, live_section)
                 continue
 
             # Every target, English included, goes through the translator -
@@ -189,7 +193,7 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             # if it were a translation.
             if _is_degenerate(translated):
                 translated = ""
-            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final, absorb, speech_end)
+            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final, absorb, speech_end, live_section)
 
     return process_segment
 
@@ -235,6 +239,8 @@ def main():
     speech_options["language"] = saved["language"]
     speech_options["context"] = saved["context"]
     speech_options["auto_names"] = saved["auto_names"]
+    live_options["interval"] = saved["live_interval"]
+    live_options["translate"] = saved["translate_live"]
 
     # Targets are addable live from Settings at any time, not just at
     # startup - so the translator loads regardless of what's initially
