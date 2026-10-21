@@ -38,7 +38,6 @@ DEFAULTS = {
     "overlay": {
         "text_scale": 1.0,      # x the default text size
         "opacity": 0.72,        # background panel opacity
-        "lines": 3,             # captions shown at once
         "show_original": True,  # the original speech under its translation
         "show_speakers": True,
         "fade_after": 8,        # seconds of silence before captions fade out; None = never

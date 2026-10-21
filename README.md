@@ -89,19 +89,25 @@ changing things and reading back. Closing it keeps the app running in the
 ### The subtitle overlays
 
 One per language you translate into, centred near the bottom of the screen
-to start with. Each shows the last few captions, newest at the bottom: the
-translation large, the original speech small underneath, and who said it
-in their own colour (names come from the Discord plugin; your own speech
-shows as "You"). A caption still being spoken updates live, trailing off
-with `…`, and settles when the speaker pauses. When nobody's talking for a
-few seconds the captions fade away.
+to start with. Captions run newest at the bottom: the translation large,
+the original speech small underneath, and who said it in their own colour
+(names come from the Discord plugin; your own speech shows as "You").
+Text has a dark outline, like film subtitles, so it stays readable over
+bright scenes even with the background panel turned right down. A caption
+still being spoken updates live, trailing off with `…`, and settles when
+the speaker pauses. When nobody's talking for a few seconds the captions
+fade away. The bigger you make an overlay, the more history it shows.
 
 - **Locked** (the default once you're set up): clicks pass straight
   through to your game. **Ctrl+Alt+L** toggles it from anywhere, as does
   the tray menu and Home.
 - **Unlocked**: hover an overlay for its controls - drag anywhere to move
   it, drag the corner to resize, the lock icon to lock it again, `x` to
-  stop that language. Positions and sizes are remembered.
+  stop that language. Positions and sizes are remembered. The mouse wheel
+  scrolls back through earlier captions (the last 150): scrolled back, the
+  overlay holds still while new captions keep arriving, and a **Back to
+  live** button shows how many are waiting - click it, or scroll to the
+  bottom, to catch up. Locking always goes back to live.
 - **Ctrl+Alt+H** hides/shows all overlays; **Ctrl+Alt+P** pauses/resumes
   captioning (nothing's transcribed while paused). These hotkeys work over
   games.
@@ -139,8 +145,8 @@ game to borderless.
     the speech model sometimes "transcribes" the list itself - a caption
     that's just names read back is dropped.
 - **Captions** - how the overlays look and behave, with a live preview:
-  text size, background opacity, how many captions show at once, speaker
-  names, the original under translations, how soon they fade, and live
+  text size, background opacity, speaker names, the original under
+  translations, how soon they fade, and live
   update timing (below). Also resets overlay positions.
 - **Audio** - system audio and microphone (both Windows' defaults - change
   those in Windows' sound settings), whether your own speech is captioned

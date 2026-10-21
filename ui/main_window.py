@@ -492,13 +492,8 @@ class _PreviewPanel(QWidget):
         self.refresh()
 
     def refresh(self):
-        prefs = self.c.prefs
-        shown = self.SAMPLES[-min(len(self.SAMPLES), prefs["lines"]):]
-        for i, block in enumerate(self.blocks):
-            visible = i >= len(self.blocks) - len(shown)
-            block.setVisible(visible)
-            if visible:
-                block.show_caption(shown[i - (len(self.blocks) - len(shown))], "en", prefs, newest=i == len(self.blocks) - 1)
+        for block, sample in zip(self.blocks, self.SAMPLES):
+            block.show_caption(sample, "en", self.c.prefs)
         self.update()
 
     def paintEvent(self, event):  # noqa: N802
@@ -543,9 +538,6 @@ class CaptionsPage(QWidget):
         look.add(SettingRow("Background", "How solid the panel behind the text is.",
                             self._slider(0, 100, int(prefs["opacity"] * 100), "%",
                                          lambda v: controller.set_pref("opacity", v / 100))))
-        lines = Segmented([(n, str(n)) for n in range(1, 7)], prefs["lines"])
-        lines.changed.connect(lambda v: controller.set_pref("lines", v))
-        look.add(SettingRow("Captions shown at once", None, lines))
         speakers = ToggleSwitch(prefs["show_speakers"])
         speakers.toggled.connect(lambda on: controller.set_pref("show_speakers", on))
         look.add(SettingRow("Speaker names", "From the Discord plugin; your own speech shows as “You”.",
@@ -575,8 +567,10 @@ class CaptionsPage(QWidget):
                               "translation arrives when they pause.", translate_live))
         content.addWidget(timing)
 
-        windows = Card("Overlay windows", "Unlock the overlays (Home, or Ctrl+Alt+L) to drag them anywhere and "
-                                          "resize them from the corner. Their positions are remembered.")
+        windows = Card("Overlay windows", "Unlock the overlays (Home, or Ctrl+Alt+L) to drag them anywhere, "
+                                          "resize them from the corner - the bigger, the more history shows - and "
+                                          "scroll back through earlier captions. Scrolled back, an overlay holds "
+                                          "still until you go back to live. Positions are remembered.")
         row = QHBoxLayout()
         row.addWidget(button("Reset positions", None, controller.reset_positions))
         row.addStretch(1)
