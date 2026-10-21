@@ -160,7 +160,7 @@ Trade-offs, measured on this setup:
 |---|---|---|
 | Whisper `large-v3` | ~4.0GB | ~0.4s |
 | `qwen3-asr-0.6b` | ~2.0GB | ~0.5s |
-| `qwen3-asr-1.7b` | ~5GB (est.) | not yet measured |
+| `qwen3-asr-1.7b` | ~4.9GB | ~0.5s |
 
 Whisper's confidence scores, which the app uses to catch made-up text, don't
 exist for Qwen3-ASR - it relies on the VAD gate and Qwen's own "no speech"
