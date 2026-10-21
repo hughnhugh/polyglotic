@@ -48,6 +48,17 @@ def main():
     assert "(live g1)" in log.getvalue() and "(final g1)" in log.getvalue() and "[removed g2" in log.getvalue()
     print("OK: log keeps the live and final captions, tagged")
 
+    # A join: g1's final caption plus a later live group g3 replaced by one
+    # caption in g1's place; then a further join replaces that again.
+    text = _shown(app, _caption("B", "more live", "g3"))
+    joined = dict(_caption("B", "the whole sentence and more", "g1", final=True), absorb=["g3"])
+    text = _shown(app, joined)
+    assert text == ("A [en, 0.3s] before\n\nB [en, 0.3s] the whole sentence and more\n\nC [en, 0.3s] interjection"
+                    "\n\nE [en, 0.3s] after"), repr(text)
+    text = _shown(app, _caption("B", "the whole sentence and even more", "g1", final=True))
+    assert "and even more\n\nC [en, 0.3s] interjection" in text and text.count("the whole sentence") == 1, repr(text)
+    print("OK: joins replace the earlier final caption and absorb live ones, in place")
+
     overlay_core.MAX_HISTORY = 3
     text = _shown(app, _caption("F", "newest"))
     assert text == "C [en, 0.3s] interjection\n\nE [en, 0.3s] after\n\nF [en, 0.3s] newest", repr(text)

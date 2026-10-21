@@ -47,6 +47,13 @@ BRIDGE_SLICE_PAD_SEC = 0.2        # clock-skew cushion on each side of a slice
 # can't. Speech longer than that keeps its live captions and only the
 # rest after the last cut is added as a final caption.
 BRIDGE_FINAL_MAX_SEC = 20.0
+# Discord flips someone's speaking indicator off at every short pause, so
+# one train of thought often arrives as several back-to-back intervals.
+# When the same person speaks again within this long, with nobody else
+# captioned in between, the joined audio (up to BRIDGE_FINAL_MAX_SEC from
+# the first interval's start) is transcribed again and that one caption
+# replaces their previous one - one sentence, not three fragments.
+BRIDGE_JOIN_GAP_SEC = 2.0
 
 MAX_HISTORY = 300                # cap on stored caption entries so the log doesn't grow unbounded
 
@@ -414,6 +421,10 @@ def _slice_timestamped_buffer(buffer, start_ts, end_ts):
 # (user_id, start): {"group": caption group id, "next_cut": ts}. Only
 # touched from the loopback capture thread.
 _live_intervals: dict = {}
+# The latest captioned run of back-to-back intervals per user, as
+# {"group", "start", "end"} - see BRIDGE_JOIN_GAP_SEC. Only the most
+# recently captioned user's run can still be joined onto.
+_runs: dict = {}
 _live_group_seq = 0
 
 
@@ -425,7 +436,6 @@ def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_
     audio only ever arrives via loopback, never the mic. model_holder:
     anything with a .get() returning the model to transcribe with (fetched
     fresh per segment, so a live model reload is picked up immediately)."""
-    global _live_group_seq
     now = time.time()
     open_now = discord_bridge.open_intervals()
     for key in [k for k in _live_intervals if k[1] < now - 60 and k not in {(u, st) for u, _, st in open_now}]:
@@ -437,8 +447,7 @@ def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_
             continue
         segment = _slice_timestamped_buffer(timestamped_buffer, next_cut, now)
         if live is None:
-            _live_group_seq += 1
-            live = _live_intervals[(user_id, start)] = {"group": f"g{_live_group_seq}"}
+            live = _live_intervals[(user_id, start)] = {"group": _new_caption_group()}
         live["next_cut"] = now
         if segment is not None:
             executor.submit(process_segment_fn, model_holder.get(), segment, "", (user_id, username),
@@ -456,21 +465,42 @@ def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_
                   f"overlaps {closed['covered_by']}'s")
             if group:  # take back any live captions it already got
                 executor.submit(process_segment_fn, model_holder.get(), None, "", speaker_hint,
-                                caption_group=group, final=True)
+                                caption_group=group, final=True, absorb=[])
             continue
         if duration < MIN_SPEECH_SEC:
             continue
-        if duration <= BRIDGE_FINAL_MAX_SEC:
+
+        user_id = closed["user_id"]
+        run = _runs.get(user_id)
+        absorb = []
+        if (run and closed["start"] - run["end"] <= BRIDGE_JOIN_GAP_SEC
+                and closed["end"] - run["start"] <= BRIDGE_FINAL_MAX_SEC):
+            # Same person again right after their last caption - redo the
+            # whole run as one caption replacing it (and this interval's
+            # live captions, if it had any).
+            start, absorb, group = run["start"], [group] if group else [], run["group"]
+        elif duration <= BRIDGE_FINAL_MAX_SEC:
             start = closed["start"]  # whole interval, replacing any live captions
         else:
             # Too long to redo - live captions stay, the rest is added.
             start = live["next_cut"] if live else closed["end"] - BRIDGE_FINAL_MAX_SEC
             group = None
+        group = group or _new_caption_group()
         segment = _slice_timestamped_buffer(timestamped_buffer, start, closed["end"])
         if segment is None or len(segment) < int(MIN_SPEECH_SEC * VAD_SAMPLE_RATE):
             continue
+        # Someone else's caption now sits after this one - their runs can't
+        # be joined onto any more.
+        _runs.clear()
+        _runs[user_id] = {"group": group, "start": start, "end": closed["end"]}
         executor.submit(process_segment_fn, model_holder.get(), segment, "", speaker_hint,
-                        caption_group=group, final=True)
+                        caption_group=group, final=True, absorb=absorb)
+
+
+def _new_caption_group():
+    global _live_group_seq
+    _live_group_seq += 1
+    return f"g{_live_group_seq}"
 
 
 def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, model_holder, executor,
@@ -885,23 +915,31 @@ class OverlayApp:
         self.text.mark_unset(mark)
 
     def _replace_group(self, group, item):
-        """Swaps a caption group's live captions for its final one, in the
-        first live caption's place - or appends it if the group had none
-        (or they've been trimmed off). item None just removes them."""
-        marks = [m for m in self._group_marks.pop(group, []) if m in self.entry_marks]
+        """Swaps a caption group's captions - its live ones, or an earlier
+        final one a join is replacing, plus those of any groups in
+        item["absorb"] - for its final one, in the earliest one's place, or
+        appends it if there are none (or they've been trimmed off). The
+        final caption stays in the group so a later join can replace it.
+        item None just removes the group's captions."""
+        groups = [group] + (item.get("absorb") or [] if item else [])
+        marks = [m for g in groups for m in self._group_marks.pop(g, []) if m in self.entry_marks]
+        marks.sort(key=lambda m: tuple(int(n) for n in self.text.index(m).split(".")))
         if item is None:
             for mark in marks:
                 self._delete_entry(mark)
             return
         if not marks:
-            self._new_entry()
+            first = self._new_entry()
             self._insert_caption(item)
-            return
-        first = marks[0]
-        for mark in marks[1:]:
-            self._delete_entry(mark)
-        self.text.delete(first, self._entry_end(first))
-        self._insert_caption(item, at=first)
+        else:
+            first = marks[0]
+            for mark in marks[1:]:
+                self._delete_entry(mark)
+            self.text.delete(first, self._entry_end(first))
+            self._insert_caption(item, at=first)
+        self._group_marks[group] = [first]
+        while len(self._group_marks) > MAX_HISTORY:  # groups long since scrolled off
+            del self._group_marks[next(iter(self._group_marks))]
 
     def _insert_caption(self, item, at="end"):
         if at != "end":

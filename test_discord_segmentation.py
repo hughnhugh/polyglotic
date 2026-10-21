@@ -43,7 +43,14 @@ def _run_drain(buffer):
     return calls
 
 
+def _reset():
+    discord_bridge._intervals.clear()
+    overlay_core._runs.clear()
+    overlay_core._live_intervals.clear()
+
+
 def test_speaking_interval_cuts_expected_segment():
+    _reset()
     buffer, t0 = _make_buffer(seconds=2.0)
     start_ts, end_ts = t0 + 0.3, t0 + 1.3  # 1s interval inside the buffered window
 
@@ -67,6 +74,7 @@ def test_speaking_interval_cuts_expected_segment():
 
 
 def test_short_interval_is_dropped():
+    _reset()
     buffer, t0 = _make_buffer(seconds=1.0)
     discord_bridge._handle_message({"event": "speaking_start", "userId": "1", "username": "Blip", "ts": t0 * 1000})
     discord_bridge._handle_message({"event": "speaking_stop", "userId": "1", "ts": (t0 + 0.1) * 1000})  # < MIN_SPEECH_SEC
@@ -79,7 +87,7 @@ def test_short_interval_is_dropped():
 def test_long_interval_transcribed_whole():
     # Up to BRIDGE_FINAL_MAX_SEC, a closed interval is transcribed in one
     # piece - no longer cut down to its last MAX_SEGMENT_SEC.
-    discord_bridge._intervals.clear()
+    _reset()
     buffer, t0 = _make_buffer(seconds=12.0)
     discord_bridge._handle_message({"event": "speaking_start", "userId": "7", "username": "Marvin", "ts": t0 * 1000})
     discord_bridge._handle_message({"event": "speaking_stop", "userId": "7", "ts": (t0 + 12.0) * 1000})
@@ -93,7 +101,7 @@ def test_long_interval_transcribed_whole():
 def test_live_captions_then_final_replaces_them():
     # Still speaking after MAX_SEGMENT_SEC -> a live caption; once they stop,
     # the whole interval again, in the same caption group, marked final.
-    discord_bridge._intervals.clear()
+    _reset()
     now = time.time()
     buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
     _speak("8", "Slartibartfast", now - 7.0)
@@ -105,13 +113,13 @@ def test_live_captions_then_final_replaces_them():
 
     _stop("8", now)
     final = _run_drain(buffer)
-    assert len(final) == 1 and final[0][4] == {"caption_group": group, "final": True}, final
+    assert len(final) == 1 and final[0][4] == {"caption_group": group, "final": True, "absorb": []}, final
     assert len(final[0][1]) >= int(6.5 * SR), f"final segment only {len(final[0][1]) / SR:.2f}s"
     print(f"OK: live caption at 7s, then a {len(final[0][1]) / SR:.2f}s final replacing it ({group})")
 
 
 def test_skipped_interval_takes_back_its_live_captions():
-    discord_bridge._intervals.clear()
+    _reset()
     now = time.time()
     buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
     _speak("9", "Eddie", now - 9.0)
@@ -124,7 +132,7 @@ def test_skipped_interval_takes_back_its_live_captions():
     _stop("9", now)
     calls = _run_drain(buffer)
     removal = [c for c in calls if c[1] is None]
-    assert len(removal) == 1 and removal[0][4] == {"caption_group": group, "final": True}, calls
+    assert len(removal) == 1 and removal[0][4] == {"caption_group": group, "final": True, "absorb": []}, calls
     assert [c[3][1] for c in calls if c[1] is not None] == ["Eddie"], calls
     print("OK: covered interval's live caption taken back, speaker's final kept")
 
@@ -143,7 +151,7 @@ def test_noise_during_speech_neither_cuts_nor_duplicates():
     # Someone's short noise mid-sentence: the speaker's interval stays open
     # (intervals are per user), so their sentence is captioned whole once,
     # and the noise-maker's slice - the same mixed audio - is skipped.
-    discord_bridge._intervals.clear()
+    _reset()
     buffer, t0 = _make_buffer(seconds=5.0)
     _speak("1", "Arthur", t0 + 0.2)
     _speak("2", "Ford", t0 + 1.5, t0 + 2.1)
@@ -158,7 +166,7 @@ def test_noise_during_speech_neither_cuts_nor_duplicates():
 def test_near_identical_intervals_captioned_once():
     # Two users flagged speaking over the same span (e.g. one's mic picking
     # up the other) - the same audio would otherwise be captioned twice.
-    discord_bridge._intervals.clear()
+    _reset()
     buffer, t0 = _make_buffer(seconds=3.0)
     _speak("3", "Caleb", t0 + 0.30)
     _speak("4", "Resul", t0 + 0.35)
@@ -173,7 +181,7 @@ def test_near_identical_intervals_captioned_once():
 def test_back_and_forth_keeps_both():
     # A reply that starts just before the previous speaker stops is mostly
     # its own audio - both get captioned.
-    discord_bridge._intervals.clear()
+    _reset()
     buffer, t0 = _make_buffer(seconds=4.0)
     _speak("5", "Trillian", t0 + 0.2, t0 + 1.5)
     _speak("6", "Zaphod", t0 + 1.3, t0 + 3.0)
@@ -181,6 +189,59 @@ def test_back_and_forth_keeps_both():
     calls = _run_drain(buffer)
     assert [c[3][1] for c in calls] == ["Trillian", "Zaphod"], f"got {[c[3] for c in calls]}"
     print("OK: overlapping turn-taking keeps both speakers")
+
+
+def test_consecutive_intervals_joined():
+    # Discord split one person's sentence at a pause: the second interval's
+    # final re-transcribes from the first's start and replaces its caption.
+    _reset()
+    buffer, t0 = _make_buffer(seconds=8.0)
+    _speak("11", "Arthur", t0 + 0.5, t0 + 2.5)
+    first = _run_drain(buffer)
+    _speak("11", "Arthur", t0 + 3.5, t0 + 5.5)  # 1s pause
+    second = _run_drain(buffer)
+    group = first[0][4]["caption_group"]
+    assert second[0][4]["caption_group"] == group, (first, second)
+    assert len(second[0][1]) >= int(4.9 * SR), f"joined segment only {len(second[0][1]) / SR:.2f}s"
+    _speak("11", "Arthur", t0 + 6.0, t0 + 7.5)
+    third = _run_drain(buffer)
+    assert third[0][4]["caption_group"] == group and len(third[0][1]) >= int(6.9 * SR), third
+    print(f"OK: three back-to-back intervals joined into one {len(third[0][1]) / SR:.2f}s caption ({group})")
+
+
+def test_join_breaks_on_other_speaker_or_long_gap():
+    _reset()
+    buffer, t0 = _make_buffer(seconds=12.0)
+    _speak("12", "Ford", t0 + 0.5, t0 + 2.0)
+    _speak("13", "Zaphod", t0 + 2.2, t0 + 3.0)
+    _speak("12", "Ford", t0 + 3.2, t0 + 4.5)
+    calls = _run_drain(buffer)
+    groups = [c[4]["caption_group"] for c in calls]
+    assert len(set(groups)) == 3, f"someone else spoke in between - expected no join, got {groups}"
+    assert len(calls[2][1]) < int(3.0 * SR), "Ford's second interval was joined across Zaphod's"
+
+    _speak("12", "Ford", t0 + 7.0, t0 + 8.5)  # 2.5s after Ford's last
+    calls = _run_drain(buffer)
+    assert calls[0][4]["caption_group"] not in groups and len(calls[0][1]) < int(3.0 * SR), calls
+    print("OK: no join across another speaker's caption or a pause over BRIDGE_JOIN_GAP_SEC")
+
+
+def test_join_absorbs_live_captions():
+    # A long interval right after the same person's last caption: its live
+    # captions get their own group, and the joined final absorbs them.
+    _reset()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
+    _speak("14", "Trillian", now - 10.0, now - 8.5)
+    first = _run_drain(buffer)
+    _speak("14", "Trillian", now - 7.5)
+    live = _run_drain(buffer)
+    _stop("14", now)
+    final = _run_drain(buffer)
+    kw = final[0][4]
+    assert kw["caption_group"] == first[0][4]["caption_group"] and kw["absorb"] == [live[0][4]["caption_group"]], (first, live, final)
+    assert len(final[0][1]) >= int(9.9 * SR), f"joined final only {len(final[0][1]) / SR:.2f}s"
+    print("OK: joined final replaces the earlier caption and absorbs the live ones")
 
 
 if __name__ == "__main__":
@@ -192,4 +253,7 @@ if __name__ == "__main__":
     test_noise_during_speech_neither_cuts_nor_duplicates()
     test_near_identical_intervals_captioned_once()
     test_back_and_forth_keeps_both()
+    test_consecutive_intervals_joined()
+    test_join_breaks_on_other_speaker_or_long_gap()
+    test_join_absorbs_live_captions()
     print("ALL OK")
