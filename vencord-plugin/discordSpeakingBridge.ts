@@ -82,7 +82,10 @@ function scheduleReconnect() {
 
 function syncChannel(channelId: string | null) {
     lastSyncedChannel = channelId;
-    if (!channelId) return;
+    if (!channelId) {
+        send({ event: "channel_sync", members: {} }); // left voice - nobody's in "your channel" any more
+        return;
+    }
 
     const guildId = ChannelStore.getChannel(channelId)?.guild_id ?? null;
     const states = VoiceStateStore.getVoiceStatesForChannel(channelId) ?? {};
@@ -112,9 +115,14 @@ function handleSpeaking({ userId, speakingFlags }: { userId: string; speakingFla
     });
 }
 
-function handleVoiceStateUpdates() {
+function handleVoiceStateUpdates({ voiceStates }: { voiceStates?: Array<{ channelId?: string | null; oldChannelId?: string | null; }>; }) {
+    // Re-send the member list when you switch channels, and whenever
+    // someone joins or leaves yours - vc-translator uses it to give the
+    // speech model the names of the people in the call.
     const myChannel = SelectedChannelStore.getVoiceChannelId();
-    if (myChannel !== lastSyncedChannel) syncChannel(myChannel);
+    const touchesMine = myChannel != null &&
+        (voiceStates ?? []).some(s => s.channelId === myChannel || s.oldChannelId === myChannel);
+    if (myChannel !== lastSyncedChannel || touchesMine) syncChannel(myChannel);
 }
 
 export default definePlugin({

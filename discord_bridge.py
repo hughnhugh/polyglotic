@@ -34,6 +34,8 @@ COVER_MAX_SEC = 20.0
 
 _lock = threading.Lock()
 _names: dict = {}
+_members: set = set()     # user ids in your voice channel, as of the plugin's last channel_sync
+_last_heard: dict = {}    # user_id -> when they last started speaking
 _intervals: list = []     # [{"user_id", "start", "end"}], end=None while still open
 _last_message_at = 0.0
 _connected_clients = 0    # actual WebSocket connection count, not activity-based
@@ -62,8 +64,11 @@ def _handle_message(msg):
         _last_message_at = time.time()
 
         if event == "channel_sync":
-            for user_id, username in (msg.get("members") or {}).items():
+            members = msg.get("members") or {}
+            for user_id, username in members.items():
                 _names[user_id] = username
+            _members.clear()
+            _members.update(members)
             return
 
         user_id = msg.get("userId")
@@ -75,6 +80,7 @@ def _handle_message(msg):
         ts = (msg.get("ts") or time.time() * 1000) / 1000.0
 
         if event == "speaking_start":
+            _last_heard[user_id] = ts
             # close any stale still-open interval for this user first, in
             # case a stop event was ever dropped
             for iv in _intervals:
@@ -243,6 +249,21 @@ def first_reply_start(user_id, after, before):
         starts = [iv["start"] for iv in _intervals
                   if iv["user_id"] != user_id and not iv.get("covered_by") and after < iv["start"] < before]
     return min(starts) if starts else None
+
+
+def channel_names(heard_within_sec=600):
+    """Display names of the people in your voice channel: everyone in the
+    plugin's last member list, plus anyone heard speaking in the last
+    heard_within_sec (the member list only refreshes when the plugin
+    re-sends it, so this also catches people who joined since, and lets
+    people who left without a refresh drop off once they've gone quiet).
+    Empty while the plugin isn't connected."""
+    with _lock:
+        if _connected_clients == 0:
+            return []
+        cutoff = time.time() - heard_within_sec
+        ids = set(_members) | {uid for uid, ts in _last_heard.items() if ts >= cutoff}
+        return sorted({_names[uid] for uid in ids if uid in _names}, key=str.lower)
 
 
 def is_active() -> bool:

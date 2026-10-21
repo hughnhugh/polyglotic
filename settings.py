@@ -2,7 +2,8 @@
 Settings remembered between launches, in settings.json next to the app, so
 a plain launch comes back the way it was last left: target languages,
 speech model, overlay position, mic capture, the Discord bridge port, and
-the speech model's conversation language and context words. Command-line
+the speech model's conversation language and context words (and whether
+to add the Discord channel members' names to them). Command-line
 options still override them for that run.
 """
 
@@ -30,6 +31,7 @@ DEFAULTS = {
     "bridge_port": 8765,
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES
     "context": "",          # names/slang passed to the speech model to bias its spelling
+    "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
 }
 
 # Settings' "Conversation language" choices: code -> label. Forcing one

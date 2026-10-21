@@ -104,7 +104,13 @@ left it; command-line options override it for that run.
   that language's own window.
 - **Names & slang** - comma-separated words the speech model should spell
   the way you wrote them (people's names, game terms, "HSK", "bún bò"...).
-  Applied from the next caption.
+  Applied from the next caption. With "Also add the Discord channel's
+  names" ticked (the default) and the Discord plugin connected, the names
+  of the people in your voice channel are added automatically, following
+  people joining and leaving - the line under it shows exactly what the
+  speech model is being given. Emoji and decorations are stripped from
+  names, and ones nobody would say out loud (just symbols, or very long)
+  are left out.
 
 The Settings window always starts visible right now (whether or not you
 pass `--target`) - it's meant to stay hidden for scripted `--target`

@@ -71,10 +71,38 @@ LIVE_OTHERS_SKIP_FRAC = 0.5
 REPLY_TRIM_WINDOW_SEC = 1.5
 REPLY_TRIM_KEEP_SEC = 0.3
 
-# The speech model's conversation language (None = auto-detect) and
-# context words, set live from Settings (see settings.CONVERSATION_LANGUAGES)
-# and read by process_segment for every segment.
-speech_options = {"language": None, "context": ""}
+# The speech model's conversation language (None = auto-detect), context
+# words, and whether to add the Discord channel members' names to them -
+# set live from Settings (see settings.CONVERSATION_LANGUAGES) and read by
+# process_segment for every segment, through speech_context().
+speech_options = {"language": None, "context": "", "auto_names": True}
+
+
+def _speakable_name(name):
+    """A Discord display name cut down to something a speech model could
+    actually hear said - emoji and decoration stripped - or None if
+    nothing name-like is left ("?", "🍁🍁") or it's too long to be what
+    anyone calls them out loud."""
+    cleaned = " ".join("".join(c if c.isalnum() or c in " '-" else " " for c in name).split())
+    if not any(c.isalpha() for c in cleaned) or len(cleaned) > 24:
+        return None
+    return cleaned
+
+
+def speech_context():
+    """The context words passed to the speech model: Settings' "Names &
+    slang", plus the Discord channel members' names when auto_names is on -
+    recomputed per segment, so people joining or leaving the call are
+    picked up as it happens."""
+    words = [w.strip() for w in speech_options["context"].split(",") if w.strip()]
+    if speech_options["auto_names"]:
+        seen = {w.lower() for w in words}
+        for name in discord_bridge.channel_names():
+            name = _speakable_name(name)
+            if name and name.lower() not in seen:
+                seen.add(name.lower())
+                words.append(name)
+    return ", ".join(words)
 
 MAX_HISTORY = 300                # cap on stored caption entries so the log doesn't grow unbounded
 

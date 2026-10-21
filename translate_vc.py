@@ -27,7 +27,7 @@ import discord_bridge
 import translator
 from lang_codes import TARGET_LANGUAGES
 import settings
-from overlay_core import is_reliable_transcription, run_translator, speech_options
+from overlay_core import is_reliable_transcription, run_translator, speech_context, speech_options
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
@@ -112,7 +112,7 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             return
         t0 = time.time()
         options = dict(task="transcribe", vad_filter=False, beam_size=5, condition_on_previous_text=False,
-                       language=speech_options["language"], initial_prompt=speech_options["context"].strip() or None)
+                       language=speech_options["language"], initial_prompt=speech_context() or None)
         try:
             segments_gen, info = model.transcribe(segment, **options)
         except ValueError:
@@ -234,6 +234,7 @@ def main():
 
     speech_options["language"] = saved["language"]
     speech_options["context"] = saved["context"]
+    speech_options["auto_names"] = saved["auto_names"]
 
     # Targets are addable live from Settings at any time, not just at
     # startup - so the translator loads regardless of what's initially

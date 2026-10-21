@@ -59,3 +59,12 @@ Everything else in `vc-translator` still works - system-audio captions are
 just unlabeled (no speaker name) whenever this bridge isn't connected or
 the plugin isn't enabled. Your own `[You]` mic captions are unaffected
 either way.
+
+## Updating
+
+After pulling a new version of `discordSpeakingBridge.ts`, copy it over the
+one in `<vencord checkout>/src/userplugins/` again and re-run `pnpm build`,
+then restart Discord. (Newer versions re-send the voice channel's member
+list whenever someone joins or leaves, which vc-translator uses to keep the
+speech model's list of names current; older builds still work, with names
+only refreshing as people speak.)

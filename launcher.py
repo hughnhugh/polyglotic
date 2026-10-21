@@ -13,7 +13,7 @@ import torch
 
 import settings
 from lang_codes import LANGUAGE_NAMES
-from overlay_core import STATUS_FIELDS, speech_options
+from overlay_core import STATUS_FIELDS, speech_context, speech_options
 from overlay_core import status as system_status
 
 # torch.cuda.memory_*() only tracks memory PyTorch's own allocator claimed -
@@ -127,6 +127,19 @@ class SettingsWindow:
             activebackground="#444444", activeforeground=FG, relief="flat", padx=8,
         ).pack(side="left")
 
+        self.auto_names_var = tk.BooleanVar(value=speech_options["auto_names"])
+        tk.Checkbutton(
+            root, text="Also add the Discord channel's names", variable=self.auto_names_var, fg=FG, bg=BG,
+            selectcolor="#333333", activebackground=BG, activeforeground=FG, font=("Segoe UI", 9),
+            command=self._on_auto_names_toggle,
+        ).pack(anchor="w", padx=12)
+        # What the speech model is actually being given, names included -
+        # refreshed by _poll_status as people join, leave or speak.
+        self.context_shown = tk.Label(root, text="", fg="#808080", bg=BG, font=("Segoe UI", 8), anchor="w",
+                                      justify="left", wraplength=490)
+        self.context_shown.pack(fill="x", padx=12)
+        self._context_refresh_ticks = 0
+
         # --- Overlay position -------------------------------------------------
         section("Overlay position")
         self.position_var = tk.StringVar(value=controller.initial_position or "auto")
@@ -221,6 +234,11 @@ class SettingsWindow:
         settings.update(context=context)
         self.status_label.config(text="Names & slang applied." if context else "Names & slang cleared.")
 
+    def _on_auto_names_toggle(self):
+        speech_options["auto_names"] = self.auto_names_var.get()
+        settings.update(auto_names=speech_options["auto_names"])
+        self._context_refresh_ticks = 0  # show the change right away
+
     def _on_mic_toggle(self):
         self.controller.mic_capture.set_enabled(self.mic_var.get())
         settings.update(mic=self.mic_var.get())
@@ -234,6 +252,11 @@ class SettingsWindow:
         self.controller.set_bridge_port(port)
 
     def _poll_status(self):
+        self._context_refresh_ticks -= 1
+        if self._context_refresh_ticks <= 0:
+            self._context_refresh_ticks = 13  # ~every 2s at the 150ms poll
+            context = speech_context()
+            self.context_shown.config(text=f"Speech model hears: {context}" if context else "")
         latest = None
         while True:
             try:
