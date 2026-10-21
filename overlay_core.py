@@ -37,8 +37,16 @@ MAX_SEGMENT_SEC = 6.0            # force a cut even mid-sentence so long monolog
 # How far back the loopback thread keeps timestamped audio, so a Discord
 # speaking_stop event can slice out exactly the span it covered. Only used
 # when discord_bridge.is_active() - see _drain_discord_segments.
-BRIDGE_BUFFER_WINDOW_SEC = 20.0
+BRIDGE_BUFFER_WINDOW_SEC = 25.0
 BRIDGE_SLICE_PAD_SEC = 0.2        # clock-skew cushion on each side of a slice
+# With the bridge, a segment is normally cut only when someone stops
+# speaking. For longer speech, a live caption is cut every MAX_SEGMENT_SEC
+# while they're still talking, and once they stop the whole interval (up
+# to BRIDGE_FINAL_MAX_SEC) is transcribed again in one piece and replaces
+# those live captions - the 6s pieces can split mid-word, the final pass
+# can't. Speech longer than that keeps its live captions and only the
+# rest after the last cut is added as a final caption.
+BRIDGE_FINAL_MAX_SEC = 20.0
 
 MAX_HISTORY = 300                # cap on stored caption entries so the log doesn't grow unbounded
 
@@ -402,29 +410,67 @@ def _slice_timestamped_buffer(buffer, start_ts, end_ts):
     return np.concatenate(parts) if parts else None
 
 
+# Open speaking intervals that have had live captions cut, keyed by
+# (user_id, start): {"group": caption group id, "next_cut": ts}. Only
+# touched from the loopback capture thread.
+_live_intervals: dict = {}
+_live_group_seq = 0
+
+
 def _drain_discord_segments(timestamped_buffer, model_holder, executor, process_segment_fn):
     """Cuts a segment for every speaking interval the Discord bridge has
     just closed, using its (user_id, username) as a speaker_hint instead of
-    the VAD + voice-embedding guess. Loopback-only - Discord audio only
-    ever arrives via loopback, never the mic. model_holder: anything with a
-    .get() returning the model to transcribe with (fetched fresh per
-    segment, so a live model reload is picked up immediately)."""
-    for closed in discord_bridge.drain_closed_intervals():
-        duration = closed["end"] - closed["start"]
-        if duration < MIN_SPEECH_SEC:
+    the VAD + voice-embedding guess - plus live captions for long speech
+    still in progress (see BRIDGE_FINAL_MAX_SEC). Loopback-only - Discord
+    audio only ever arrives via loopback, never the mic. model_holder:
+    anything with a .get() returning the model to transcribe with (fetched
+    fresh per segment, so a live model reload is picked up immediately)."""
+    global _live_group_seq
+    now = time.time()
+    open_now = discord_bridge.open_intervals()
+    for key in [k for k in _live_intervals if k[1] < now - 60 and k not in {(u, st) for u, _, st in open_now}]:
+        del _live_intervals[key]  # closed without a stop event reaching the queue
+    for user_id, username, start in open_now:
+        live = _live_intervals.get((user_id, start))
+        next_cut = live["next_cut"] if live else start
+        if now - next_cut < MAX_SEGMENT_SEC:
             continue
+        segment = _slice_timestamped_buffer(timestamped_buffer, next_cut, now)
+        if live is None:
+            _live_group_seq += 1
+            live = _live_intervals[(user_id, start)] = {"group": f"g{_live_group_seq}"}
+        live["next_cut"] = now
+        if segment is not None:
+            executor.submit(process_segment_fn, model_holder.get(), segment, "", (user_id, username),
+                            caption_group=live["group"], final=False)
+
+    for closed in discord_bridge.drain_closed_intervals():
+        live = _live_intervals.pop((closed["user_id"], closed["start"]), None)
+        group = live["group"] if live else None
+        speaker_hint = (closed["user_id"], closed["username"])
+        duration = closed["end"] - closed["start"]
         if closed.get("covered_by"):
             # Same mixed audio as another user's segment - see
             # discord_bridge.OVERLAP_SKIP_FRAC.
             print(f"[debug] skipped {closed['username']}'s {duration:.1f}s interval - "
                   f"overlaps {closed['covered_by']}'s")
+            if group:  # take back any live captions it already got
+                executor.submit(process_segment_fn, model_holder.get(), None, "", speaker_hint,
+                                caption_group=group, final=True)
             continue
-        start = max(closed["start"], closed["end"] - MAX_SEGMENT_SEC)  # cap runaway segments
+        if duration < MIN_SPEECH_SEC:
+            continue
+        if duration <= BRIDGE_FINAL_MAX_SEC:
+            start = closed["start"]  # whole interval, replacing any live captions
+        else:
+            # Too long to redo - live captions stay, the rest is added.
+            start = live["next_cut"] if live else closed["end"] - BRIDGE_FINAL_MAX_SEC
+            group = None
         segment = _slice_timestamped_buffer(timestamped_buffer, start, closed["end"])
         if segment is None or len(segment) < int(MIN_SPEECH_SEC * VAD_SAMPLE_RATE):
             continue
-        speaker_hint = (closed["user_id"], closed["username"])
-        executor.submit(process_segment_fn, model_holder.get(), segment, "", speaker_hint)
+        executor.submit(process_segment_fn, model_holder.get(), segment, "", speaker_hint,
+                        caption_group=group, final=True)
 
 
 def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, model_holder, executor,
@@ -578,6 +624,7 @@ class OverlayApp:
         self.root = root
         self.stop_event = stop_event
         self.entry_marks = deque()
+        self._group_marks: "dict[str, list[str]]" = {}  # caption group -> its live entries' marks
         self._mark_seq = 0
         self.log_file = log_file
         self.caption_queue = caption_queue if caption_queue is not None else queue.Queue()
@@ -782,12 +829,13 @@ class OverlayApp:
 
             self.text.config(state="normal")
             for item in new_items:
-                if self.text.index("end-1c") != "1.0":
-                    self.text.insert("end", "\n\n")
-                mark = f"e{self._mark_seq}"
-                self._mark_seq += 1
-                self.text.mark_set(mark, "end-1c")
-                self.entry_marks.append(mark)
+                group = item.get("group") if isinstance(item, dict) else None
+                if group and item.get("final"):
+                    self._replace_group(group, item if item.get("native") else None)
+                    continue
+                mark = self._new_entry()
+                if group:
+                    self._group_marks.setdefault(group, []).append(mark)
                 if isinstance(item, dict):
                     self._insert_caption(item)
                 else:
@@ -808,18 +856,78 @@ class OverlayApp:
 
         self.root.after(100, self.poll_queue)
 
-    def _insert_caption(self, item):
+    def _new_entry(self):
+        """Starts a new entry at the end of the text and returns its mark.
+        Left gravity keeps the mark at the entry's start as its text is
+        inserted after it, so an entry spans its mark to the next one's."""
+        if self.text.index("end-1c") != "1.0":
+            self.text.insert("end", "\n\n")
+        mark = f"e{self._mark_seq}"
+        self._mark_seq += 1
+        self.text.mark_set(mark, "end-1c")
+        self.text.mark_gravity(mark, "left")
+        self.entry_marks.append(mark)
+        return mark
+
+    def _entry_end(self, mark):
+        """Index just past the entry's own text, before the separator that
+        precedes the next entry."""
+        i = self.entry_marks.index(mark)
+        return f"{self.entry_marks[i + 1]} -2c" if i + 1 < len(self.entry_marks) else "end-1c"
+
+    def _delete_entry(self, mark):
+        i = self.entry_marks.index(mark)
+        if i + 1 < len(self.entry_marks):
+            self.text.delete(mark, self.entry_marks[i + 1])
+        else:  # last entry - take the separator before it instead
+            self.text.delete(f"{mark} -2c" if i > 0 else mark, "end-1c")
+        del self.entry_marks[i]
+        self.text.mark_unset(mark)
+
+    def _replace_group(self, group, item):
+        """Swaps a caption group's live captions for its final one, in the
+        first live caption's place - or appends it if the group had none
+        (or they've been trimmed off). item None just removes them."""
+        marks = [m for m in self._group_marks.pop(group, []) if m in self.entry_marks]
+        if item is None:
+            for mark in marks:
+                self._delete_entry(mark)
+            return
+        if not marks:
+            self._new_entry()
+            self._insert_caption(item)
+            return
+        first = marks[0]
+        for mark in marks[1:]:
+            self._delete_entry(mark)
+        self.text.delete(first, self._entry_end(first))
+        self._insert_caption(item, at=first)
+
+    def _insert_caption(self, item, at="end"):
+        if at != "end":
+            # A right-gravity cursor mark, so consecutive inserts land in
+            # order after one another rather than all at the entry's start.
+            self.text.mark_set("insert_at", at)
+            self.text.mark_gravity("insert_at", "right")
+            at = "insert_at"
+        meta = item["meta"] + (" \u2026" if item.get("group") and not item.get("final") else "")
         if item.get("speaker"):
-            self.text.insert("end", item["speaker"] + " ", "speaker")
-        self.text.insert("end", item["meta"] + " ", "meta")
-        self.text.insert("end", item["native"], "native")
+            self.text.insert(at, item["speaker"] + " ", "speaker")
+        self.text.insert(at, meta + " ", "meta")
+        self.text.insert(at, item["native"], "native")
         if item.get("translated"):
-            self.text.insert("end", "\n    -> ", "meta")
-            self.text.insert("end", item["translated"], "translated")
+            self.text.insert(at, "\n    -> ", "meta")
+            self.text.insert(at, item["translated"], "translated")
 
     @staticmethod
     def _plain_text(item):
+        if item.get("group") and not item.get("native"):
+            return f"[removed {item['group']} - duplicate of another speaker]"
         parts = [p for p in (item.get("speaker"), item["meta"]) if p]
+        if item.get("group"):
+            # Live pieces and the final caption replacing them are all
+            # logged; the tag ties them together.
+            parts.append(f"({'final' if item.get('final') else 'live'} {item['group']})")
         text = " ".join(parts) + " " + item["native"]
         if item.get("translated"):
             text += f"\n    -> {item['translated']}"

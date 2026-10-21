@@ -198,6 +198,15 @@ def drain_closed_intervals():
     return items
 
 
+def open_intervals():
+    """(user_id, username, start) for every speaking interval still open -
+    overlay_core cuts live captions from these while someone's mid-speech,
+    before the interval closes."""
+    with _lock:
+        return [(iv["user_id"], _names.get(iv["user_id"], f"User_{iv['user_id']}"), iv["start"])
+                for iv in _intervals if iv["end"] is None]
+
+
 def is_active() -> bool:
     """True if a message has arrived recently - used to gate segmentation
     (see overlay_core._capture_loop_inner): trust the bridge's own

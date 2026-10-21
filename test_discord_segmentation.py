@@ -38,7 +38,7 @@ class _FakeModelHolder:
 def _run_drain(buffer):
     calls = []
     executor = ThreadPoolExecutor(max_workers=1)
-    overlay_core._drain_discord_segments(buffer, _FakeModelHolder("FAKE_MODEL"), executor, lambda *a: calls.append(a))
+    overlay_core._drain_discord_segments(buffer, _FakeModelHolder("FAKE_MODEL"), executor, lambda *a, **kw: calls.append(a + (kw,)))
     executor.shutdown(wait=True)
     return calls
 
@@ -53,7 +53,7 @@ def test_speaking_interval_cuts_expected_segment():
 
     calls = _run_drain(buffer)
     assert len(calls) == 1, f"expected exactly one segment cut, got {calls}"
-    model, segment, source_tag, speaker_hint = calls[0]
+    model, segment, source_tag, speaker_hint, _ = calls[0]
     assert model == "FAKE_MODEL"
     assert source_tag == "", f"expected loopback source_tag '', got {source_tag!r}"
     assert speaker_hint == ("42", "Zaphod"), f"unexpected speaker_hint: {speaker_hint}"
@@ -76,21 +76,57 @@ def test_short_interval_is_dropped():
     print("OK: short interval correctly dropped")
 
 
-def test_runaway_interval_is_capped():
+def test_long_interval_transcribed_whole():
+    # Up to BRIDGE_FINAL_MAX_SEC, a closed interval is transcribed in one
+    # piece - no longer cut down to its last MAX_SEGMENT_SEC.
+    discord_bridge._intervals.clear()
     buffer, t0 = _make_buffer(seconds=12.0)
-    end_ts = t0 + 12.0
     discord_bridge._handle_message({"event": "speaking_start", "userId": "7", "username": "Marvin", "ts": t0 * 1000})
-    discord_bridge._handle_message({"event": "speaking_stop", "userId": "7", "ts": end_ts * 1000})
+    discord_bridge._handle_message({"event": "speaking_stop", "userId": "7", "ts": (t0 + 12.0) * 1000})
 
     calls = _run_drain(buffer)
     assert len(calls) == 1
-    segment = calls[0][1]
-    cap_len = int(overlay_core.MAX_SEGMENT_SEC * SR)
-    pad_len = int(2 * overlay_core.BRIDGE_SLICE_PAD_SEC * SR)
-    assert len(segment) <= cap_len + pad_len + int(0.2 * SR), (
-        f"segment of {len(segment)} samples wasn't capped near MAX_SEGMENT_SEC ({cap_len} samples)"
-    )
-    print(f"OK: 12s interval capped to {len(segment)/SR:.2f}s (MAX_SEGMENT_SEC={overlay_core.MAX_SEGMENT_SEC}s)")
+    assert len(calls[0][1]) >= int(11.5 * SR), f"12s interval was cut to {len(calls[0][1]) / SR:.2f}s"
+    print(f"OK: 12s interval transcribed whole ({len(calls[0][1]) / SR:.2f}s)")
+
+
+def test_live_captions_then_final_replaces_them():
+    # Still speaking after MAX_SEGMENT_SEC -> a live caption; once they stop,
+    # the whole interval again, in the same caption group, marked final.
+    discord_bridge._intervals.clear()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
+    _speak("8", "Slartibartfast", now - 7.0)
+
+    live = _run_drain(buffer)
+    assert len(live) == 1 and live[0][4]["final"] is False and live[0][4]["caption_group"], live
+    group = live[0][4]["caption_group"]
+    assert _run_drain(buffer) == [], "a second live cut came before another MAX_SEGMENT_SEC passed"
+
+    _stop("8", now)
+    final = _run_drain(buffer)
+    assert len(final) == 1 and final[0][4] == {"caption_group": group, "final": True}, final
+    assert len(final[0][1]) >= int(6.5 * SR), f"final segment only {len(final[0][1]) / SR:.2f}s"
+    print(f"OK: live caption at 7s, then a {len(final[0][1]) / SR:.2f}s final replacing it ({group})")
+
+
+def test_skipped_interval_takes_back_its_live_captions():
+    discord_bridge._intervals.clear()
+    now = time.time()
+    buffer, _ = _make_buffer(seconds=12.0, start_ts=now - 12.0)
+    _speak("9", "Eddie", now - 9.0)
+    _speak("10", "Deep Thought", now - 8.0)  # open-mic echo of Eddie's speech
+    live = _run_drain(buffer)
+    assert len(live) == 2, live
+    group = next(c[4]["caption_group"] for c in live if c[3][1] == "Deep Thought")
+
+    _stop("10", now - 0.5)
+    _stop("9", now)
+    calls = _run_drain(buffer)
+    removal = [c for c in calls if c[1] is None]
+    assert len(removal) == 1 and removal[0][4] == {"caption_group": group, "final": True}, calls
+    assert [c[3][1] for c in calls if c[1] is not None] == ["Eddie"], calls
+    print("OK: covered interval's live caption taken back, speaker's final kept")
 
 
 def _speak(user_id, username, start_ts, end_ts=None):
@@ -150,7 +186,9 @@ def test_back_and_forth_keeps_both():
 if __name__ == "__main__":
     test_speaking_interval_cuts_expected_segment()
     test_short_interval_is_dropped()
-    test_runaway_interval_is_capped()
+    test_long_interval_transcribed_whole()
+    test_live_captions_then_final_replaces_them()
+    test_skipped_interval_takes_back_its_live_captions()
     test_noise_during_speech_neither_cuts_nor_duplicates()
     test_near_identical_intervals_captioned_once()
     test_back_and_forth_keeps_both()

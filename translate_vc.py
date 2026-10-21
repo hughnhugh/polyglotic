@@ -66,12 +66,14 @@ def _is_degenerate(text):
     return False
 
 
-def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None):
+def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False):
     q.put({
         "speaker": lead.strip(),
         "meta": f"[{lang}, {elapsed:.1f}s]",
         "native": native_text,
         "translated": translated_text,
+        "group": group,
+        "final": final,
     })
 
 
@@ -83,7 +85,16 @@ def make_process_segment(targets, caption_queues, translation_enabled):
     window shows the native transcription only and skips the translation
     request entirely."""
 
-    def process_segment(model, segment, source_tag="", speaker_hint=None):
+    def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False):
+        """caption_group/final: a long Discord interval's live captions
+        (final=False) share a group, and its final caption (final=True)
+        replaces them in each overlay - see overlay_core.BRIDGE_FINAL_MAX_SEC.
+        segment None with a group just removes that group's live captions.
+        If the final pass yields nothing usable the live captions stay."""
+        if caption_group and final and segment is None:
+            for q in caption_queues.values():
+                q.put({"group": caption_group, "final": True, "native": None})
+            return
         if model is None:
             # Submitted while a speech-model swap had the old one unloaded
             # (see ModelHolder.request_reload) - nothing to transcribe with.
@@ -136,18 +147,18 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             if info.language == "zh" and target_lang in CHINESE_TARGETS:
                 elapsed = time.time() - t0
                 shown = CHINESE_TARGETS[target_lang].convert(native_text)
-                _emit_caption(q, lead, info.language, elapsed, shown)
+                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final)
                 continue
 
             if info.language == target_lang:
                 # already the target language - nothing to translate
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final)
                 continue
 
             if not translation_enabled.get(target_lang, True):
                 elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text)
+                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final)
                 continue
 
             # Every target, English included, goes through the translator -
@@ -166,7 +177,7 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             # if it were a translation.
             if _is_degenerate(translated):
                 translated = ""
-            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None)
+            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final)
 
     return process_segment
 
