@@ -171,7 +171,9 @@ updates each had (`live x3`) and processing time alone (`proc`).
 - `--target LANG[,LANG...]` - one or more comma-separated target language
   codes to start captioning immediately (default: the last run's, or `en`). 38 target languages - the ones Hy-MT2 supports
   (see `lang_codes.py`), including `zh` (Simplified Chinese), `zh-hant`
-  (Traditional Chinese) and `yue` (Cantonese) as separate targets. Speech in
+  (Traditional Chinese) and `yue` (Cantonese) as separate targets -
+  Cantonese written in Hong Kong Traditional characters with the colloquial
+  Cantonese ones (嘅、咗、唔、佢、喺...), as is Cantonese speech itself. Speech in
   any language Whisper recognizes can be translated *from*; only the target
   is limited to this list. More targets can always be added live from
   Settings too.

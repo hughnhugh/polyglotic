@@ -39,6 +39,24 @@ _s2t = OpenCC("s2t")
 # guaranteed rather than left to the model.
 CHINESE_TARGETS = {"zh": _t2s, "zh-hant": _s2t}
 
+_s2hk = OpenCC("s2hk")
+# Simplified 系 is three Traditional characters: in spoken Cantonese almost
+# always 係 ("is" - 係咪, 唔係, 真係), which s2hk outside its phrase list
+# leaves as 系 ("但系") or turns into 繫 ("真繫"). So both become 係, except
+# in words that really are 繫 (tie) or 系 (system, series, department).
+_XI_WORD_RE = re.compile(r"系(?=統|列|數|譜|綜)|(?<=[體派星河語水學科陽文日韓港台美歐英直旁])系")
+_TIE_WORD_RE = re.compile(r"(?<=[聯維牽心])繫|繫(?=上|住|鞋|緊)")
+
+
+def _cantonese_script(text):
+    """Cantonese in Hong Kong Traditional characters - for Cantonese speech
+    (the speech model writes it in Simplified) and as a safety net on the
+    translator's Cantonese output. Colloquial Cantonese characters (嘅、咗、
+    唔、佢...) are the same in both scripts, so they pass straight through."""
+    converted = _s2hk.convert(text)
+    keep = {m.start() for m in _XI_WORD_RE.finditer(converted)} | {m.start() for m in _TIE_WORD_RE.finditer(converted)}
+    return "".join("係" if c in "系繫" and i not in keep else c for i, c in enumerate(converted))
+
 _CLAUSE_SPLIT_RE = re.compile(r"[,,。.!!??;;\n]+")
 
 
@@ -174,6 +192,8 @@ def make_process_segment(targets, caption_queues, translation_enabled):
 
         if info.language == "zh":
             native_text = _t2s.convert(native_text)  # normalize display text to Simplified
+        elif info.language == "yue":
+            native_text = _cantonese_script(native_text)  # Cantonese reads in Traditional
 
         for target_lang in targets:
             q = caption_queues[target_lang]
@@ -202,6 +222,8 @@ def make_process_segment(targets, caption_queues, translation_enabled):
             translated = translator.translate(native_text, info.language, target_lang)
             if target_lang in CHINESE_TARGETS:
                 translated = CHINESE_TARGETS[target_lang].convert(translated)
+            elif target_lang == "yue":
+                translated = _cantonese_script(translated)
 
             elapsed = time.time() - t0
             # The translation isn't reliability-checked like the transcription

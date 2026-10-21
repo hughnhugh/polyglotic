@@ -18,7 +18,12 @@ TARGET_LANGUAGES = {
     "en": ("English", "English", "英语"),
     "zh": ("Chinese (Simplified)", "Simplified Chinese", "简体中文"),
     "zh-hant": ("Chinese (Traditional)", "Traditional Chinese", "繁体中文"),
-    "yue": ("Cantonese", "Cantonese", "粤语"),
+    # Spelled out so Hy-MT2 writes Cantonese the way it's read - Hong Kong
+    # Traditional characters with the colloquial ones (嘅、咗、唔...) - rather
+    # than in Simplified about half the time, as plain "粤语" got it to.
+    "yue": ("Cantonese", "Cantonese, written in Hong Kong Traditional Chinese characters with colloquial "
+            "Cantonese characters such as 嘅, 咗, 唔, 佢, 喺, 啲, 冇 and 嘢",
+            "粤语，用香港繁体字书写，并使用粤语口语字（如嘅、咗、唔、佢、喺、啲、冇、嘢、乜、點解）"),
     "fr": ("French", "French", "法语"),
     "pt": ("Portuguese", "Portuguese", "葡萄牙语"),
     "es": ("Spanish", "Spanish", "西班牙语"),
