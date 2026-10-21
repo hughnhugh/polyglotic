@@ -18,7 +18,8 @@ import time
 from websockets.asyncio.server import serve
 
 DEFAULT_PORT = 8765
-ACTIVE_TIMEOUT_SEC = 10   # no messages for this long -> treat the bridge as inactive
+ACTIVE_TIMEOUT_SEC = 10   # no messages for this long (and nobody mid-speech) -> treat the bridge as inactive
+STALE_OPEN_INTERVAL_SEC = 300  # "speaking" longer than this is a dropped stop event, not a monologue
 INTERVAL_WINDOW_SEC = 30  # how far back to retain speaking intervals
 # Everyone's voice arrives mixed into one loopback stream, so two users'
 # overlapping intervals slice out the same audio - e.g. someone's open mic
@@ -267,15 +268,25 @@ def channel_names(heard_within_sec=600):
 
 
 def is_active() -> bool:
-    """True if a message has arrived recently - used to gate segmentation
-    (see overlay_core._capture_loop_inner): trust the bridge's own
-    speaking-event cuts only while it's recently said something, falling
-    back to VAD otherwise. This is an *activity* signal, not a connection
-    one - it flips constantly during normal conversation (anyone can go
-    quiet for 10+ seconds), so don't use it for a user-facing "connected"
-    status - see is_connected() for that."""
+    """True if a message has arrived recently, or someone's still mid-speech
+    - used to gate segmentation (see overlay_core._capture_loop_inner):
+    trust the bridge's own speaking-event cuts only while it's recently
+    said something, falling back to VAD otherwise. Someone talking nonstop
+    sends nothing between speaking_start and speaking_stop, so without the
+    open-interval check a monologue over ACTIVE_TIMEOUT_SEC flipped to VAD
+    mid-sentence and got captioned twice, the second time unlabeled. This
+    is an *activity* signal, not a connection one - it flips constantly
+    during normal conversation (anyone can go quiet for 10+ seconds), so
+    don't use it for a user-facing "connected" status - see is_connected()
+    for that."""
     with _lock:
-        return (time.time() - _last_message_at) < ACTIVE_TIMEOUT_SEC
+        now = time.time()
+        if now - _last_message_at < ACTIVE_TIMEOUT_SEC:
+            return True
+        # An interval left open by a dropped stop event mustn't hold the
+        # bridge active forever.
+        return _connected_clients > 0 and any(
+            iv["end"] is None and now - iv["start"] < STALE_OPEN_INTERVAL_SEC for iv in _intervals)
 
 
 def is_connected() -> bool:

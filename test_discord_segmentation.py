@@ -354,6 +354,25 @@ def test_segment_executor_latest_wins():
     print("OK: executor runs finals first, only the newest live update, none superseded by a final")
 
 
+def test_monologue_keeps_bridge_active():
+    # Nonstop talking sends no messages between speaking_start and stop -
+    # the bridge must stay active (not fall back to VAD and caption the
+    # same audio again, unlabeled) for as long as someone's mid-speech.
+    _reset()
+    discord_bridge._connected_clients = 1
+    _speak("40", "JuGGerNauT", time.time() - 30)
+    discord_bridge._last_message_at = time.time() - 30
+    assert discord_bridge.is_active(), "bridge went inactive mid-monologue"
+    _stop("40", time.time())
+    discord_bridge._last_message_at = time.time() - 30
+    assert not discord_bridge.is_active()
+    _speak("41", "Stuck", time.time() - 600)  # stop event lost long ago
+    discord_bridge._last_message_at = time.time() - 30
+    assert not discord_bridge.is_active(), "a stale open interval held the bridge active"
+    discord_bridge._connected_clients = 0
+    print("OK: bridge stays active through a 30s monologue, not through a stale open interval")
+
+
 if __name__ == "__main__":
     test_speaking_interval_cuts_expected_segment()
     test_short_interval_is_dropped()
@@ -371,4 +390,5 @@ if __name__ == "__main__":
     test_reply_at_the_end_is_trimmed_off()
     test_live_caption_grows_and_rolls_over()
     test_segment_executor_latest_wins()
+    test_monologue_keeps_bridge_active()
     print("ALL OK")
