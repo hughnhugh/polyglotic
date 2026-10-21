@@ -67,7 +67,13 @@ def start():
     log_file = open(log_path, "w", encoding="utf-8")
     _proc = subprocess.Popen(
         [LLAMA_SERVER, "-m", MODEL_PATH, "--host", "127.0.0.1", "--port", str(port),
-         "-ngl", "999", "-c", str(CONTEXT_TOKENS), "-np", "1", "-fa", "on", "--jinja", "--no-webui"],
+         "-ngl", "999", "-c", str(CONTEXT_TOKENS), "-np", "1", "-fa", "on", "--jinja", "--no-webui",
+         # No host-RAM prompt cache: it defaults to 8GB, and with every
+         # caption a fresh prompt it just grew toward that over a call
+         # (13GB+ resident observed) without speeding anything up. And read
+         # the model in rather than memory-mapping it: fully on the GPU,
+         # the mapped copy only kept ~4.5GB of RAM resident for nothing.
+         "--cache-ram", "0", "--load-mode", "none"],
         stdout=log_file, stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW,
     )
     kill_with_parent(_proc)  # can never outlive the app and keep ~5GB of VRAM pinned
