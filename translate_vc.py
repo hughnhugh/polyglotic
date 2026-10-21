@@ -1,20 +1,21 @@
 """
 Live translator for Discord (or any system audio).
 Captures whatever your PC is currently playing (WASAPI loopback) plus your
-mic, detects speech with Silero VAD, transcribes it with Whisper, and
-translates it into one or more target languages of your choosing
-(--target) with Hy-MT2, a local translation LLM (see translator.py).
+mic, cuts it into speech segments (Silero VAD, or Discord's own speaking
+events through the bridge plugin), transcribes them (Qwen3-ASR or Whisper)
+and translates each into every chosen target language with Hy-MT2, a local
+translation LLM (see translator.py).
 
-Shows captions in a small always-on-top overlay window, one per target.
+Captions appear in a subtitle overlay per target language, the main
+window's transcript, and a session log (see ui/ and captions.py).
 
 Usage:
-    python translate_vc.py --target en
-    python translate_vc.py --target zh
+    python translate_vc.py                 # as last left (settings.json)
     python translate_vc.py --target en,vi
 
-A single process handles capture/VAD/transcription once per speech segment
-regardless of how many targets are requested - only the translation step
-is repeated per target.
+A single process handles capture/transcription once per speech segment
+regardless of how many targets are chosen - only translation is repeated
+per target.
 """
 
 import argparse
@@ -24,10 +25,10 @@ import time
 from opencc import OpenCC
 
 import discord_bridge
+import settings
 import translator
 from lang_codes import TARGET_LANGUAGES
-import settings
-from overlay_core import is_reliable_transcription, live_options, run_translator, speech_context, speech_options
+from overlay_core import capture_options, is_reliable_transcription, live_options, speech_context, speech_options
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
@@ -100,51 +101,30 @@ def _echoes_context(text, context):
     return len(hits) == 2 and covered >= 0.6 * len(lowered.replace(" ", "").replace(",", ""))
 
 
-def _emit_caption(q, lead, lang, elapsed, native_text, translated_text=None, group=None, final=False, absorb=(),
-                  speech_end=None, live_section=0):
-    q.put({
-        "speaker": lead.strip(),
-        "lang": lang,
-        "proc": elapsed,
-        "speech_end": speech_end,  # the overlay turns this into the shown delay
-        "meta": f"[{lang}, {elapsed:.1f}s]",
-        "native": native_text,
-        "translated": translated_text,
-        "group": group,
-        "final": final,
-        "absorb": list(absorb),
-        "live_section": live_section,
-    })
-
-
-def make_process_segment(targets, caption_queues, translation_enabled):
-    """One shared Whisper transcription per speech segment, fanned out to
-    every requested target language/overlay - instead of redoing that
-    decode work once per target. translation_enabled: {target: bool},
-    flipped live by each overlay's "T" button - when off, that target's
-    window shows the native transcription only and skips the translation
-    request entirely."""
+def make_process_segment(targets, out_queue):
+    """process_segment for the pipeline: one transcription per speech
+    segment, translated into every target in `targets` (the live list the
+    UI edits) and put on `out_queue` as a single caption record for
+    captions.CaptionBoard."""
 
     def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False,
                         absorb=(), speech_end=None, live_section=0):
-        """caption_group/final: a long Discord interval's live captions
-        (final=False) share a group, and its final caption (final=True)
-        replaces them in each overlay - see overlay_core.BRIDGE_FINAL_MAX_SEC.
-        A final also replaces the captions of the groups in absorb - a
-        speaker's back-to-back intervals joined into one caption (see
-        overlay_core.BRIDGE_JOIN_GAP_SEC). segment None with a group just
-        removes that group's live captions. If the final pass yields
-        nothing usable the earlier captions stay. speech_end: when the
-        speech ended, for the overlay's end-to-end delay readout.
+        """caption_group/final: a caption's live updates (final=False) share
+        a group, and its final caption (final=True) replaces them - see
+        overlay_core.LIVE_MIN_AUDIO_SEC. A final also replaces the captions
+        of the groups in absorb - a speaker's back-to-back speech joined
+        into one caption (see overlay_core.BRIDGE_JOIN_GAP_SEC). segment
+        None with a group just removes that group's live caption. If the
+        final pass yields nothing usable the earlier captions stay.
+        speech_end: when the speech ended, for the end-to-end delay readout.
         live_section: which section of its growing live caption a live
         update is (see overlay_core.LIVE_SECTION_SEC)."""
         if caption_group and final and segment is None:
-            for q in caption_queues.values():
-                q.put({"group": caption_group, "final": True, "native": None})
+            out_queue.put({"group": caption_group, "final": True, "native": None})
             return
-        if model is None:
+        if model is None or capture_options["paused"]:
             # Submitted while a speech-model swap had the old one unloaded
-            # (see ModelHolder.request_reload) - nothing to transcribe with.
+            # (see ModelHolder.request_reload), or before a pause.
             return
         t0 = time.time()
         options = dict(task="transcribe", vad_filter=False, beam_size=5, condition_on_previous_text=False,
@@ -159,8 +139,8 @@ def make_process_segment(targets, caption_queues, translation_enabled):
 
         if not is_reliable_transcription(native_segments, info):
             if source_tag != "mic":
-                # Console-only (not the overlay) - loopback speech getting cut by
-                # VAD/the Discord bridge but then discarded here would otherwise be
+                # Console-only - loopback speech getting cut by VAD/the
+                # Discord bridge but then discarded here would otherwise be
                 # invisible, since this is a silent return.
                 avg_no_speech = sum(s.no_speech_prob for s in native_segments) / len(native_segments) if native_segments else None
                 avg_logprob = sum(s.avg_logprob for s in native_segments) / len(native_segments) if native_segments else None
@@ -179,62 +159,53 @@ def make_process_segment(targets, caption_queues, translation_enabled):
                   f"{native_text!r}")
             return
 
-        if source_tag == "mic":
-            lead = "[You] "
-        elif speaker_hint is not None:
-            # Ground truth from the Discord speaking bridge - the only
-            # source of speaker labels this app has; without it, captions
-            # are unlabeled rather than guessed.
-            _user_id, username = speaker_hint
-            lead = f"{username} "
-        else:
-            lead = ""
-
         if info.language == "zh":
             native_text = _t2s.convert(native_text)  # normalize display text to Simplified
         elif info.language == "yue":
             native_text = _cantonese_script(native_text)  # Cantonese reads in Traditional
 
-        for target_lang in targets:
-            q = caption_queues[target_lang]
-
+        translations = {}  # target -> (text to show, is it a translation)
+        for target_lang in list(targets):
             if info.language == "zh" and target_lang in CHINESE_TARGETS:
-                elapsed = time.time() - t0
-                shown = CHINESE_TARGETS[target_lang].convert(native_text)
-                _emit_caption(q, lead, info.language, elapsed, shown, None, caption_group, final, absorb, speech_end, live_section)
-                continue
+                # Mandarin into Chinese: only the script, if anything, changes
+                translations[target_lang] = (CHINESE_TARGETS[target_lang].convert(native_text), False)
+            elif info.language == target_lang or (caption_group and not final and not live_options["translate"]):
+                translations[target_lang] = (native_text, False)
+            else:
+                # Every target, English included, goes through the
+                # translator - it replaced Whisper's own X->English
+                # translate task too, which occasionally invented content
+                # (see translator.py).
+                translated = translator.translate(native_text, info.language, target_lang)
+                if target_lang in CHINESE_TARGETS:
+                    translated = CHINESE_TARGETS[target_lang].convert(translated)
+                elif target_lang == "yue":
+                    translated = _cantonese_script(translated)
+                # The translation isn't reliability-checked like the
+                # transcription above - it can come back empty (translator
+                # still loading, or a failed request) or, rarely, as a
+                # degenerate loop. Show the original either way rather than
+                # dropping the caption or passing that off as a translation.
+                if _is_degenerate(translated):
+                    translated = ""
+                translations[target_lang] = (translated, True) if translated else (native_text, False)
 
-            if info.language == target_lang:
-                # already the target language - nothing to translate
-                elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end, live_section)
-                continue
-
-            if not translation_enabled.get(target_lang, True) or (caption_group and not final
-                                                                  and not live_options["translate"]):
-                elapsed = time.time() - t0
-                _emit_caption(q, lead, info.language, elapsed, native_text, None, caption_group, final, absorb, speech_end, live_section)
-                continue
-
-            # Every target, English included, goes through the translator -
-            # it replaced Whisper's own X->English translate task too, which
-            # occasionally invented content (see translator.py).
-            translated = translator.translate(native_text, info.language, target_lang)
-            if target_lang in CHINESE_TARGETS:
-                translated = CHINESE_TARGETS[target_lang].convert(translated)
-            elif target_lang == "yue":
-                translated = _cantonese_script(translated)
-
-            elapsed = time.time() - t0
-            # The translation isn't reliability-checked like the transcription
-            # above - it can come back empty (translator still loading, or a
-            # failed request) or, rarely, as a degenerate loop, even though
-            # the native transcription was solid. Show the native text either
-            # way rather than silently dropping the caption or showing that as
-            # if it were a translation.
-            if _is_degenerate(translated):
-                translated = ""
-            _emit_caption(q, lead, info.language, elapsed, native_text, translated or None, caption_group, final, absorb, speech_end, live_section)
+        out_queue.put({
+            # Ground truth from the Discord speaking bridge - the only source
+            # of speaker labels this app has; without it, captions are
+            # unlabeled rather than guessed.
+            "speaker": "You" if source_tag == "mic" else (speaker_hint[1] if speaker_hint else ""),
+            "you": source_tag == "mic",
+            "lang": info.language,
+            "native": native_text,
+            "translations": translations,
+            "group": caption_group,
+            "final": final,
+            "absorb": list(absorb),
+            "live_section": live_section,
+            "speech_end": speech_end,
+            "proc": time.time() - t0,
+        })
 
     return process_segment
 
@@ -242,21 +213,17 @@ def make_process_segment(targets, caption_queues, translation_enabled):
 def main():
     saved = settings.load()
     parser = argparse.ArgumentParser(
-        description="Live translator overlay for Discord/system audio. Options left out come from the last run "
+        description="Live translator for Discord/system audio. Options left out come from the last run "
                     "(settings.json).")
     parser.add_argument(
         "--target", "-t", default=None,
-        help="Comma-separated target language code(s), e.g. 'en,vi'. One shared audio/transcription "
-             f"pipeline is used, with one overlay window per target. Supported: {', '.join(sorted(TARGET_LANGUAGES))}",
+        help="Comma-separated target language code(s), e.g. 'en,vi' - one subtitle overlay each. "
+             f"Supported: {', '.join(sorted(TARGET_LANGUAGES))}",
     )
     parser.add_argument(
         "--model", "-m", default=None,
-        help="Speech model: a Whisper size, or qwen3-asr-1.7b / qwen3-asr-0.6b "
+        help="Speech model: qwen3-asr-1.7b / qwen3-asr-0.6b, or a Whisper size "
              "(default: qwen3-asr-1.7b if installed, else large-v3)",
-    )
-    parser.add_argument(
-        "--position", choices=["top", "bottom"], default=None,
-        help="Overlay screen anchor for every window (default: bottom for en, top for everything else, per target)",
     )
     parser.add_argument("--no-mic", action="store_true", help="Don't also capture your microphone")
     parser.add_argument(
@@ -265,15 +232,9 @@ def main():
     )
     args = parser.parse_args()
 
-    # The Settings window is meant to start hidden/tray-only for scripted
-    # launches that shouldn't pop a window unasked - but the tray icon is
-    # currently disabled (see run_translator's comment - pystray segfaults
-    # against Tkinter in this environment), and hidden-with-no-tray would
-    # strand it unreachable. Always show it for now.
-    show_settings = True
     target_arg = args.target or ",".join(saved["targets"]) or "en"
-    initial_targets = list(dict.fromkeys(t.strip().lower() for t in target_arg.split(",") if t.strip()))
-    for target in initial_targets:
+    targets = list(dict.fromkeys(t.strip().lower() for t in target_arg.split(",") if t.strip()))
+    for target in targets:
         if target not in TARGET_LANGUAGES:
             raise SystemExit(f"Unsupported target language '{target}'. Supported: {', '.join(sorted(TARGET_LANGUAGES))}")
 
@@ -282,21 +243,18 @@ def main():
     speech_options["auto_names"] = saved["auto_names"]
     live_options["interval"] = saved["live_interval"]
     live_options["translate"] = saved["translate_live"]
+    capture_options["caption_mic"] = saved["caption_mic"]
 
-    # Targets are addable live from Settings at any time, not just at
-    # startup - so the translator loads regardless of what's initially
-    # requested. In the background: the window comes up immediately, with
-    # the load tracked in its status panel.
+    # Loads in the background; the main window's status tracks it.
     translator.start()
 
-    run_translator(
+    from ui.app import run  # local import - Qt is only needed for the app itself
+    run(
         make_process_segment,
-        initial_targets,
+        targets,
         model_size=args.model or saved["model"],
         capture_mic=saved["mic"] and not args.no_mic,
-        discord_bridge_port=args.discord_bridge_port or saved["bridge_port"],
-        show_settings=show_settings,
-        initial_position=args.position or saved["position"],
+        bridge_port=args.discord_bridge_port or saved["bridge_port"],
     )
 
 

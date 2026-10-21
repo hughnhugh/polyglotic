@@ -109,7 +109,7 @@ Install-Packages "Upgrading pip" @("--upgrade", "pip")
 Install-Packages "Installing PyTorch (CUDA build - this is a large download)" `
     @("torch", "torchaudio", "--index-url", "https://download.pytorch.org/whl/cu128")
 Install-Packages "Installing core dependencies" `
-    @("faster-whisper", "PyAudioWPatch", "numpy", "opencc-python-reimplemented", "websockets")
+    @("faster-whisper", "PyAudioWPatch", "numpy", "opencc-python-reimplemented", "websockets", "PySide6")
 Install-Packages "Installing GPU memory readout support (optional)" @("nvidia-ml-py") -required $false
 
 # --- Translator: llama.cpp server + Hy-MT2 model --------------------------

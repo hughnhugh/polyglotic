@@ -1,10 +1,10 @@
 """
 Settings remembered between launches, in settings.json next to the app, so
 a plain launch comes back the way it was last left: target languages,
-speech model, overlay position, mic capture, the Discord bridge port, and
-the speech model's conversation language and context words (and whether
-to add the Discord channel members' names to them). Command-line
-options still override them for that run.
+speech model, mic capture, the Discord bridge port, the speech model's
+conversation language and context words, live caption timing, and the
+subtitle overlays' look, positions and lock. Command-line options still
+override them for that run.
 """
 
 import json
@@ -26,14 +26,25 @@ def _default_model():
 DEFAULTS = {
     "targets": ["en"],
     "model": None,          # filled in by load() - depends on what's installed
-    "position": None,       # None = auto (bottom for en, top otherwise)
     "mic": True,
+    "caption_mic": True,    # caption your own speech (the mic is still captured for nothing else)
     "bridge_port": 8765,
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES
     "context": "",          # names/slang passed to the speech model to bias its spelling
     "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
+    # Subtitle overlays (ui/overlay.py)
+    "overlay": {
+        "text_scale": 1.0,      # x the default text size
+        "opacity": 0.72,        # background panel opacity
+        "lines": 3,             # captions shown at once
+        "show_original": True,  # the original speech under its translation
+        "show_speakers": True,
+        "fade_after": 8,        # seconds of silence before captions fade out; None = never
+    },
+    "overlay_geometry": {},     # target -> [x, y, width, height], once moved/resized
+    "locked": False,            # overlays click-through
 }
 
 # Live update interval: the dropdown's suggestions; any value in this range
@@ -61,11 +72,17 @@ def load():
     gives the defaults."""
     global _values
     with _lock:
-        values = dict(DEFAULTS, model=_default_model())
+        values = json.loads(json.dumps(DEFAULTS))  # deep copy - nested groups get edited in place
+        values["model"] = _default_model()
         try:
             with open(PATH, encoding="utf-8") as f:
                 saved = json.load(f)
-            values.update({k: v for k, v in saved.items() if k in DEFAULTS})
+            for k, v in saved.items():
+                if k not in DEFAULTS:
+                    continue
+                # Nested groups merge, so options added since the file was
+                # written still get their defaults.
+                values[k] = dict(DEFAULTS[k], **v) if isinstance(DEFAULTS[k], dict) and isinstance(v, dict) else v
         except (OSError, ValueError):
             pass
         _values = values
@@ -78,7 +95,8 @@ def update(**changes):
     global _values
     with _lock:
         if _values is None:
-            _values = dict(DEFAULTS, model=_default_model())
+            _values = json.loads(json.dumps(DEFAULTS))
+            _values["model"] = _default_model()
         _values.update(changes)
         tmp = PATH + ".tmp"
         try:

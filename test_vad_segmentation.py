@@ -35,7 +35,7 @@ class _FakeModelHolder:
         return "FAKE_MODEL"
 
 
-def _run(pattern, captioning_on=True, interval=None):
+def _run(pattern, captioning_on=True, interval=None, paused=False):
     """pattern: [(seconds, speaking?)] -> the submitted calls, after
     feeding it as 16kHz mic audio timestamped from t0."""
     overlay_core._runs.clear()
@@ -50,12 +50,11 @@ def _run(pattern, captioning_on=True, interval=None):
     for i in range(0, len(pcm) - CHUNK + 1, CHUNK):
         q.put((t0 + i / SR, pcm[i:i + CHUNK].tobytes()))
 
-    state = overlay_core.SelfCaptionState()
-    state.enabled = captioning_on
+    overlay_core.capture_options.update(caption_mic=captioning_on, paused=paused)
     executor, stop = _RecordingExecutor(), threading.Event()
     worker = threading.Thread(target=overlay_core._capture_loop_inner,
                               args=(stop, q, SR, 1, _LoudnessVAD(), _FakeModelHolder(), executor,
-                                    lambda *a, **k: None, "mic", state))
+                                    lambda *a, **k: None, "mic"))
     worker.start()
     while not q.empty():
         time.sleep(0.05)
@@ -119,6 +118,13 @@ def test_self_captioning_off_submits_nothing():
     print("OK: nothing submitted with self-captioning off")
 
 
+def test_paused_submits_nothing():
+    calls, _ = _run([(0.5, False), (9.0, True), (1.5, False)], interval=1.5, paused=True)
+    overlay_core.capture_options["paused"] = False
+    assert calls == [], calls
+    print("OK: nothing submitted while paused")
+
+
 if __name__ == "__main__":
     test_short_utterance_one_final()
     test_long_utterance_live_then_whole_final()
@@ -126,4 +132,5 @@ if __name__ == "__main__":
     test_back_to_back_utterances_joined()
     test_long_pause_not_joined()
     test_self_captioning_off_submits_nothing()
+    test_paused_submits_nothing()
     print("ALL OK")

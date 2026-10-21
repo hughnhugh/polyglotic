@@ -2,17 +2,17 @@
 
 Live translator for Discord (or any Windows system audio). Captures your PC's
 audio output via WASAPI loopback plus your microphone, detects speech with
-Silero VAD, transcribes it with `faster-whisper`, and translates it to a
-target language of your choosing with Hy-MT2-7B, a translation-tuned LLM
+Silero VAD (or Discord's own speaking events), transcribes it with
+Qwen3-ASR or Whisper, and translates it into the languages of your choosing with Hy-MT2-7B, a translation-tuned LLM
 served by a local llama.cpp server — all running locally on your GPU, no
 cloud APIs.
 
-Shows a small always-on-top overlay with the original text and its
-translation. Pass a comma-separated `--target` list to get multiple
-simultaneous overlays (e.g. one for English, one for Chinese) from a single
-process - audio capture and Whisper transcription happen once per spoken
-segment and are shared across every target; only the (cheap) translation
-step runs once per target.
+Captions appear as subtitles over your game or video - the translation,
+the original underneath, and who said it - one overlay per language you
+translate into (e.g. English and Chinese at once). Audio capture and
+transcription happen once per spoken segment and are shared across every
+language; only the (cheap) translation step runs once per language. A main
+window holds the settings and a searchable transcript of the session.
 
 ## Requirements
 
@@ -58,7 +58,7 @@ that one run, without changing any system-wide setting.
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install --upgrade pip
 .\venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented websockets
+.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented websockets PySide6
 .\venv\Scripts\python.exe -m pip install nvidia-ml-py
 ```
 
@@ -70,128 +70,136 @@ into `bin\`, and download
 [`Hy-MT2-7B-Q4_K_M.gguf`](https://huggingface.co/tencent/Hy-MT2-7B-GGUF) into
 `models\`.
 
-`nvidia-ml-py` (the last line) is optional (Settings' GPU memory readout
+`nvidia-ml-py` (the last line) is optional (Home's GPU memory readout
 only) - queries the driver directly via NVML so it reflects everything using
-VRAM, including Whisper (which runs through ctranslate2, invisible to
-PyTorch's own memory stats). Without it, the readout falls back to a
-PyTorch-only number that misses Whisper's usage entirely.
+VRAM, every model included. Without it, the readout shows as unavailable.
 
 ## Run
 
 ```powershell
 .\venv\Scripts\python.exe translate_vc.py
-.\venv\Scripts\python.exe translate_vc.py --target en
-.\venv\Scripts\python.exe translate_vc.py --target zh
-.\venv\Scripts\python.exe translate_vc.py --target en,vi
 ```
 
-This is a persistent app, not a one-shot script: a **Settings window** is
-always available - a normal, taskbar-visible window (alt-tabbable like any
-other app) where you pick target languages (by name, e.g. "Vietnamese", not
-code), speech model, conversation language, names & slang, overlay
-position, mic capture, and the Discord bridge port, all editable live while
-it keeps running - checking/unchecking a language opens/closes its overlay
-immediately, no restart needed. All of it is remembered in `settings.json`
-for the next launch, so a plain `translate_vc.py` comes back the way you
-left it; command-line options override it for that run.
+It comes back the way you last left it - target languages, speech model,
+caption look and the rest are remembered in `settings.json`. Captions
+appear as subtitles over whatever you're doing; the **main window** is for
+changing things and reading back. Closing it keeps the app running in the
+**system tray** - quit from the tray icon or the main window's sidebar.
 
-- **Conversation language** - "Auto-detect" (default), or English,
-  Mandarin, Cantonese or Vietnamese only. Forcing one skips the speech
-  model's language detection, so short or mumbled speech can't be misread
-  as some other language (Thai, Malay...). Use it for calls that are
-  entirely in one language: anything said in another language is still
-  written down, but labeled as the forced one - so it isn't translated in
-  that language's own window.
-- **Names & slang** - comma-separated words the speech model should spell
-  the way you wrote them (people's names, game terms, "HSK", "bún bò"...).
-  Applied from the next caption. With "Also add the Discord channel's
-  names" ticked (the default) and the Discord plugin connected, the names
-  of the people in your voice channel are added automatically, following
-  people joining and leaving - the line under it shows exactly what the
-  speech model is being given. Emoji and decorations are stripped from
-  names, ones that read more like a status than a name (just symbols,
-  over two words or 16 characters, Chinese over 4 characters) are left
-  out, and at most 12 are used, most recent speakers first. Given a short
-  or unclear clip, the speech model sometimes "transcribes" the list
-  itself - a caption that's just names read back is dropped.
+### The subtitle overlays
 
-The Settings window always starts visible right now (whether or not you
-pass `--target`) - it's meant to stay hidden for scripted `--target`
-launches with the tray as the way back in, but the tray is currently
-disabled (see below), so hiding it would strand it unreachable.
+One per language you translate into, centred near the bottom of the screen
+to start with. Each shows the last few captions, newest at the bottom: the
+translation large, the original speech small underneath, and who said it
+in their own colour (names come from the Discord plugin; your own speech
+shows as "You"). A caption still being spoken updates live, trailing off
+with `…`, and settles when the speaker pauses. When nobody's talking for a
+few seconds the captions fade away.
 
-**Window behavior:** closing Settings (✕) quits the whole app - streams,
-models, the Discord bridge, everything. Minimizing behaves like a normal
-window for now - a system tray/minimize-to-tray integration was tried
-(`tray.py`) but pystray's native Win32 message-loop thread turned out to
-segfault against Tkinter's own message loop on Windows, so it's disabled
-until a safer approach is found.
+- **Locked** (the default once you're set up): clicks pass straight
+  through to your game. **Ctrl+Alt+L** toggles it from anywhere, as does
+  the tray menu and Home.
+- **Unlocked**: hover an overlay for its controls - drag anywhere to move
+  it, drag the corner to resize, the lock icon to lock it again, `x` to
+  stop that language. Positions and sizes are remembered.
+- **Ctrl+Alt+H** hides/shows all overlays; **Ctrl+Alt+P** pauses/resumes
+  captioning (nothing's transcribed while paused). These hotkeys work over
+  games.
 
-An overlay window appears per active target (bottom for `en`, top for other
-targets by default; windows sharing an anchor stack instead of overlapping).
-Drag one to reposition, click its ✕ or press Escape to close just that
-window (unchecks it in Settings too), drag the bottom-right corner to
-resize, `_` to minimize it to a small tab, `T` to toggle that window's
-translation off/on (dims when off) - handy if you just want the native
-transcription without a second line underneath - and `Me` to toggle your
-own mic captioning off/on (shared across every window, since it's one mic
-feed) - handy for muting yourself out of the captions without disabling
-your mic in Discord itself. Have Discord (or whatever app) playing audio
-through your default output device — your microphone is captured too,
-tagged `[You]`, unless toggled off.
+Overlays sit on top of windowed and borderless-fullscreen games. In
+exclusive fullscreen, Windows puts the game above everything - switch the
+game to borderless.
 
-**How captions update:** while someone's talking, their caption appears
-live (marked `…`) and grows as they go - every 1.5 seconds by default,
-what they've said is transcribed again and the caption updates in place,
-extending and correcting itself as more context arrives. When they pause,
-the whole stretch is transcribed once more in one go and replaces it. If
-the same person carries on within 2 seconds, with nobody else captioned in
-between, their new speech is joined onto that caption and the whole run
-re-transcribed and re-translated as one. Speech running over 20 seconds
-without a pause is captioned in 20-second pieces.
+### The main window
 
-Settings' **"Live caption updates every"** box sets the update interval:
-pick a suggestion or type any number of seconds from 0.5 to 20, or `Off`
-for no live captions (each appears only once the speaker pauses). Shorter
-feels more live but uses more GPU time; it can't build a backlog, though -
-when the GPU's busy, waiting live updates are replaced by newer ones rather
-than queued, and captions finishing a pause always go first. **"translate
-them too"** (on by default) translates live updates as well; off, they show
-the original text and translate on the pause. Long live captions grow in
+- **Home** - whether it's listening, a Pause button, the everyday toggles
+  (caption your own speech, lock and show overlays, show the original
+  under translations), the languages being captioned, and the status of
+  each part - speech model, translator, audio, Discord - with GPU memory.
+- **Transcript** - everything captioned this session, every language side
+  by side, searchable, with Copy all and a link to the logs folder.
+- **Languages** - what to translate into (each gets an overlay), the
+  spoken language, and names & slang:
+  - **Spoken language** - Auto-detect (default), or English, Mandarin,
+    Cantonese or Vietnamese. Choosing one skips the speech model's
+    language detection, so short or mumbled speech can't be misread as
+    another language (Thai, Malay...). Use it for calls entirely in one
+    language: anything said in another is still written down, but labeled
+    as the chosen one - so it isn't translated in that language's overlay.
+  - **Names & slang** - comma-separated words the speech model should
+    spell your way (people's names, game terms, "HSK", "bún bò"...).
+    With "Add the names of people in the Discord call" on (the default)
+    and the Discord plugin connected, the names of the people in your
+    voice channel are added automatically, following people joining and
+    leaving - the line underneath shows exactly what the model is given.
+    Emoji and decorations are stripped from names, ones that read more
+    like a status than a name (just symbols, over two words or 16
+    characters, Chinese over 4 characters) are left out, and at most 12
+    are used, most recent speakers first. Given a short or unclear clip,
+    the speech model sometimes "transcribes" the list itself - a caption
+    that's just names read back is dropped.
+- **Captions** - how the overlays look and behave, with a live preview:
+  text size, background opacity, how many captions show at once, speaker
+  names, the original under translations, how soon they fade, and live
+  update timing (below). Also resets overlay positions.
+- **Audio** - system audio and microphone (both Windows' defaults - change
+  those in Windows' sound settings), whether your own speech is captioned
+  (off saves GPU time), and the Discord plugin's connection, who's in the
+  call, and its port.
+- **Models** - the speech model (switching takes a few seconds, during
+  which captions pause) and the translator's status.
+
+### How captions update
+
+While someone's talking, their caption appears live and grows as they go -
+every 1.5 seconds by default, what they've said is transcribed again and
+the caption updates in place, extending and correcting itself as more
+context arrives. When they pause, the whole stretch is transcribed once
+more in one go and replaces it. If the same person carries on within 2
+seconds, with nobody else captioned in between, their new speech is
+joined onto that caption and the whole run re-transcribed and
+re-translated as one. Speech running over 20 seconds without a pause is
+captioned in 20-second pieces.
+
+Captions' **"Live updates every"** box sets the update interval: pick a
+suggestion or type any number of seconds from 0.5 to 20, or `Off` for no
+live captions (each appears only once the speaker pauses). Shorter feels
+more live but uses more GPU time; it can't build a backlog, though - when
+the GPU's busy, waiting live updates are replaced by newer ones rather
+than queued, and captions finishing a pause always go first. **"Translate
+live updates"** (on by default) translates them as they come; off, they
+show the original and translate on the pause. Long live captions grow in
 6-second sections, so each update stays quick (transcription time grows
 with the audio: ~0.35s for 1.5s of speech, ~1.1s for 6s, ~3.5s for 20s).
 
-The time in each caption's `[lang, 1.2s]` tag is the delay from the end of
-the speech to the caption appearing - waiting and processing included.
-Only final captions are written to the log files, with how many live
-updates each had (`live x3`) and processing time alone (`proc`).
+Each session is logged to `logs/Session_<date>_<time>.log`: every final
+caption with its translations, the delay from the end of the speech to it
+appearing, processing time alone (`proc`) and how many live updates it had
+(`live x3`).
 
 ### Options
 
-- `--target LANG[,LANG...]` - one or more comma-separated target language
-  codes to start captioning immediately (default: the last run's, or `en`). 38 target languages - the ones Hy-MT2 supports
-  (see `lang_codes.py`), including `zh` (Simplified Chinese), `zh-hant`
+Anything left out comes from the last run.
+
+- `--target LANG[,LANG...]` - target language codes, e.g. `en,vi` (first
+  run: `en`). 38 target languages - the ones Hy-MT2 supports (see
+  `lang_codes.py`), including `zh` (Simplified Chinese), `zh-hant`
   (Traditional Chinese) and `yue` (Cantonese) as separate targets -
-  Cantonese written in Hong Kong Traditional characters with the colloquial
-  Cantonese ones (嘅、咗、唔、佢、喺...), as is Cantonese speech itself. Speech in
-  any language Whisper recognizes can be translated *from*; only the target
-  is limited to this list. More targets can always be added live from
-  Settings too.
-- `--model SIZE` - initial speech model: a Whisper size, or
-  `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see below) (default: the last run's;
-  first run `qwen3-asr-1.7b` if it's installed, else `large-v3`) -
-  changeable live from Settings afterward (briefly pauses captioning while
-  it swaps).
-- `--position top|bottom` - initial overlay screen anchor for every window
-  (default: `bottom` for `en`, `top` otherwise, chosen per target) -
-  changeable live from Settings afterward.
-- `--no-mic` - don't capture your microphone at startup - changeable live
-  from Settings afterward.
+  Cantonese written in Hong Kong Traditional characters with the
+  colloquial Cantonese ones (嘅、咗、唔、佢、喺...), as is Cantonese speech
+  itself. Speech in any language the speech model recognizes can be
+  translated *from*; only the target is limited to this list.
+- `--model SIZE` - speech model: `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see
+  below) or a Whisper size (first run: `qwen3-asr-1.7b` if it's installed,
+  else `large-v3`).
+- `--no-mic` - don't capture your microphone.
+- `--discord-bridge-port PORT` - the Discord plugin's port (default 8765).
 
 ## Qwen3-ASR speech model (optional)
 
-An alternative to Whisper for transcription, picked from Settings' "Speech
-model" dropdown (`qwen3-asr-1.7b` or `qwen3-asr-0.6b`). Alibaba's
+An alternative to Whisper for transcription, picked on the main window's
+Models page (`qwen3-asr-1.7b` or `qwen3-asr-0.6b`), and the default once
+installed. Alibaba's
 Qwen3-ASR is much stronger than Whisper on Cantonese and other Chinese
 dialects (by Qwen's own benchmarks - roughly half Whisper's error rate on
 Cantonese, far less on conversational Cantonese), and reports Cantonese as
@@ -232,16 +240,16 @@ Vencord plugin (`vencord-plugin/discordSpeakingBridge.ts`) reads Discord's
 own "who is currently speaking" state (the same signal behind the green
 speaking ring in the UI) and the real username, and pushes that to a small
 local WebSocket server `translate_vc.py` runs (`--discord-bridge-port`,
-default `8765`, also changeable live from Settings). When connected,
+default `8765`, also changeable on the Audio page). When connected,
 loopback-audio segment boundaries and labels come straight from Discord's
 own speaking start/stop events. See `vencord-plugin/README.md` for
-build/install steps. The overlay shows a one-line status whenever the
-bridge connects or drops, so it's always clear which segmentation path is
-active. Note changing the port from Settings only affects the Python side -
+build/install steps. Home and the Audio page show whether it's connected
+and who's in the call. Note changing the port in the app only affects the
+Python side -
 the Vencord plugin has its own separate `port` setting to match.
 
 Without the plugin connected, `vc-translator` works exactly the same, just
-with unlabeled captions for system audio (your own `[You]` mic captions are
+with unlabeled captions for system audio (your own mic captions, "You", are
 always labeled). Note the bridge can't isolate simultaneous speakers' audio
 from each other (that would need a bot with real per-user voice-receive) -
 it only improves *identity and segment timing* on top of the existing
@@ -275,8 +283,8 @@ captions:
   captions - `eval/compare_translators.py` reruns that comparison.
 - Chinese speech is normalized to Simplified for display; pick `--target
   zh-hant` if you want Traditional output instead.
-- Every session's captions are logged to `logs/` (gitignored) with
-  timestamps, one file per overlay window (target) per run.
+- Every session's captions are logged to `logs/Session_<date>_<time>.log`
+  (gitignored), every target language together.
 
 ## Troubleshooting
 
@@ -292,11 +300,11 @@ captions:
   restriction bypassed for just that one run. (Or manually:
   `powershell -ExecutionPolicy Bypass -File setup.ps1`.)
 - **First launch seems stuck / slow.** It's downloading the Whisper and VAD
-  models (~3GB total, one-time) - check the Settings window's status
-  panel, which shows "Loading..." per component. A slow/metered connection
+  models (~3GB total, one-time) - Home's Status panel shows "Loading..."
+  per component. A slow/metered connection
   can make this take several minutes.
 - **Captions show only the original text, no translation.** Check the
-  Settings window's "Translation (Hy-MT2)" row. "Not installed" means
+  Translator row on Home (or the Models page). "Not installed" means
   `bin\` or `models\` is missing - re-run `setup.bat`. "Failed" means the
   server didn't start - see `logs/llama-server.log`; the usual causes are an
   NVIDIA driver too old for CUDA 13, or not enough free VRAM (close other
@@ -310,9 +318,9 @@ captions:
   differs from your Windows default output device, loopback capture won't
   hear it - either match them, or see PyAudioWPatch's docs for capturing a
   specific device.
-- **Model reload / GPU memory reading not moving.** The Settings window's
-  "Speech model" status row is the source of truth for whether a model
-  switch actually completed (`Ready (size)`); the GPU row needs
-  `nvidia-ml-py` installed to see Whisper's memory at all (see Setup above).
+- **Model switch / GPU memory reading not moving.** The Models page's
+  status line is the source of truth for whether a model switch actually
+  completed (`Ready (size)`); Home's GPU readout needs `nvidia-ml-py`
+  installed (see Setup above).
   A failed switch to Qwen3-ASR reverts to the previous model - its server
   log is `logs/qwen-asr-server.log`.
