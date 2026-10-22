@@ -298,7 +298,7 @@ class TranscriptPage(QWidget):
         card.add(self.view)
         layout.addWidget(card, 1)
 
-        self._shown = None
+        self._rows = None  # what's shown: [(caption key, its html)]
         controller.board_changed.connect(self.render)
         controller.targets_changed.connect(lambda: self.render(force=True))
 
@@ -313,35 +313,49 @@ class TranscriptPage(QWidget):
                         or any(query in text.lower() for text, _ in c.translations.values())]
         return captions
 
+    def _row(self, cap):
+        speaker = html.escape(cap.speaker) if cap.speaker else "Someone"
+        color = theme.speaker_color(cap.speaker, cap.is_you) if cap.speaker else theme.TEXT_DIM
+        lines = [f'<span style="color:{theme.TEXT_FAINT}">{cap.time:%H:%M:%S}</span>&nbsp;&nbsp;'
+                 f'<b style="color:{color}">{speaker}</b>&nbsp;&nbsp;'
+                 f'<span style="color:{theme.TEXT_FAINT}">{html.escape(spoken_language_name(cap.lang))}</span>',
+                 f'<span style="color:{theme.TEXT}">{html.escape(cap.native)}</span>']
+        for target in self.c.targets:
+            text, is_translation = cap.translations.get(target, ("", False))
+            if is_translation and text:
+                lines.append(f'<span style="color:{theme.TEXT_FAINT}">{html.escape(LANGUAGE_NAMES.get(target, target))}'
+                             f'</span>&nbsp;&nbsp;<span style="color:{theme.TEXT_DIM}">{html.escape(text)}</span>')
+        return f'<div style="line-height:140%">{"<br>".join(lines)}<br></div>'
+
     def render(self, force=False):
+        """Shows the finished captions. Live updates don't touch it, a new
+        caption is appended, and only a changed one (a join) rebuilds the
+        text - off-screen, keeping your place unless you're at the bottom,
+        so it never flashes or jumps under you."""
         if not self.isVisible():
             return
-        version = (self.c.board.version, self.search.text())
-        if version == self._shown and not force:
+        rows = [(cap.key, self._row(cap)) for cap in self._matching()]
+        if rows == self._rows and not force:
             return
-        self._shown = version
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
-        rows = []
-        for cap in self._matching():
-            speaker = html.escape(cap.speaker) if cap.speaker else "Someone"
-            color = theme.speaker_color(cap.speaker, cap.is_you) if cap.speaker else theme.TEXT_DIM
-            lines = [f'<span style="color:{theme.TEXT_FAINT}">{cap.time:%H:%M:%S}</span>&nbsp;&nbsp;'
-                     f'<b style="color:{color}">{speaker}</b>&nbsp;&nbsp;'
-                     f'<span style="color:{theme.TEXT_FAINT}">{html.escape(spoken_language_name(cap.lang))}</span>',
-                     f'<span style="color:{theme.TEXT}">{html.escape(cap.native)}</span>']
-            for target in self.c.targets:
-                text, is_translation = cap.translations.get(target, ("", False))
-                if is_translation and text:
-                    lines.append(f'<span style="color:{theme.TEXT_FAINT}">{html.escape(LANGUAGE_NAMES.get(target, target))}'
-                                 f'</span>&nbsp;&nbsp;<span style="color:{theme.TEXT_DIM}">{html.escape(text)}</span>')
-            rows.append(f'<p style="margin:0 0 14px 0; line-height:140%">{"<br>".join(lines)}</p>')
-        if not rows:
-            rows = [f'<p style="color:{theme.TEXT_FAINT}">'
-                    f'{"No matches." if self.search.text().strip() else "Nothing yet - captions will collect here."}</p>']
-        self.view.setHtml(f'<div style="font-size:13px">{"".join(rows)}</div>')
-        if at_bottom or force:
-            bar.setValue(bar.maximum())
+        position = bar.value()
+        self.view.setUpdatesEnabled(False)
+        try:
+            if self._rows and not force and rows[:len(self._rows)] == self._rows:
+                new = rows[len(self._rows):]  # just more at the end
+            else:
+                self.view.clear()
+                new = rows
+            for _, row in new:
+                self.view.append(row)
+            if not rows:
+                self.view.setHtml(f'<p style="color:{theme.TEXT_FAINT}">'
+                                  f'{"No matches." if self.search.text().strip() else "Nothing yet - captions will collect here."}</p>')
+            self._rows = rows
+            bar.setValue(bar.maximum() if at_bottom or force else position)
+        finally:
+            self.view.setUpdatesEnabled(True)
 
     def _copy(self):
         lines = []

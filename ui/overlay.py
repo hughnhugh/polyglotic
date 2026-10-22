@@ -16,7 +16,7 @@ the bottom) catches it up.
 import math
 import time
 
-from PySide6.QtCore import QPoint, QPointF, QRect, QSize, Qt, QTimer
+from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
                                QVBoxLayout, QWidget)
@@ -26,6 +26,7 @@ from ui import theme
 PAD = 14
 FADE_STEP = 0.08          # per 30ms tick - about a third of a second to fade
 HISTORY = 150             # captions an overlay keeps to scroll back through
+GLIDE_MS = 260            # how long new lines take to slide into place
 BASE_PRIMARY_PX = 22
 BASE_SECONDARY_PX = 18    # the original - big enough to read at a glance, not to compete
 BASE_SPEAKER_PX = 13
@@ -294,6 +295,11 @@ class CaptionOverlay(QWidget):
         bar = self.scroll.verticalScrollBar()
         bar.valueChanged.connect(self._on_scrolled)
         bar.rangeChanged.connect(lambda *_: self._stick_to_bottom())
+        # New lines glide up into place rather than jumping a whole line.
+        self._glide = QPropertyAnimation(bar, b"value", self)
+        self._glide.setDuration(GLIDE_MS)
+        self._glide.setEasingCurve(QEasingCurve.Type.OutCubic)
+        self.scroll.viewport().installEventFilter(self)  # a wheel turn interrupts a glide
 
         # Floats over the captions while scrolled back.
         self.live_btn = QPushButton(self)
@@ -345,8 +351,9 @@ class CaptionOverlay(QWidget):
         self.header.setVisible(interactive)
         self.grip.setVisible(interactive)
         self.placeholder.setVisible(interactive and not self._blocks)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded if interactive
-                                               else Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        policy = Qt.ScrollBarPolicy.ScrollBarAsNeeded if interactive else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        if self.scroll.verticalScrollBarPolicy() != policy:
+            self.scroll.setVerticalScrollBarPolicy(policy)
         self.setCursor(Qt.CursorShape.SizeAllCursor if interactive else Qt.CursorShape.ArrowCursor)
         self._place_live_button()
         self.update()
@@ -392,14 +399,32 @@ class CaptionOverlay(QWidget):
     # -- scrolling ------------------------------------------------------------
 
     def _stick_to_bottom(self):
-        if self._following:
-            bar = self.scroll.verticalScrollBar()
+        """Following live, keep the newest caption in view - gliding there
+        when it's visible, so new lines slide in instead of jumping."""
+        if not self._following:
+            return
+        bar = self.scroll.verticalScrollBar()
+        target = bar.maximum()
+        if bar.value() == target and self._glide.state() != QPropertyAnimation.State.Running:
+            return
+        if not self.isVisible() or self._alpha < 0.05:
+            self._glide.stop()
             self._auto_scrolling = True
-            bar.setValue(bar.maximum())
+            bar.setValue(target)
             self._auto_scrolling = False
+            return
+        self._glide.stop()
+        self._glide.setStartValue(bar.value())
+        self._glide.setEndValue(target)
+        self._glide.start()
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if event.type() == QEvent.Type.Wheel:
+            self._glide.stop()  # the reader takes over
+        return False
 
     def _on_scrolled(self, value):
-        if self._auto_scrolling:
+        if self._auto_scrolling or self._glide.state() == QPropertyAnimation.State.Running:
             return
         bar = self.scroll.verticalScrollBar()
         at_bottom = value >= bar.maximum() - 2
