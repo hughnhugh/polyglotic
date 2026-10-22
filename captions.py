@@ -46,6 +46,22 @@ class Caption:
     updated_at: float = field(default_factory=time.time)
     time: datetime = field(default_factory=datetime.now)
 
+    def lines_for(self, target, second=None):
+        """(said, translation) for `target`'s overlay: the white line - what
+        was said, in its own language (script-converted for the target where
+        that's all it needs) - and the yellow one under it: its translation
+        into `target`, or, when it was already said in the target's
+        language, into `second`; None when there's nothing to translate."""
+        text, is_translation = self.translations.get(target, (self.native, False))
+        if is_translation and text:
+            return self.native, text
+        said = text or self.native
+        if second and second != target:
+            text2, is_translation2 = self.translations.get(second, ("", False))
+            if is_translation2 and text2:
+                return said, text2
+        return said, None
+
     def text_for(self, target):
         """(primary, original): what to show in `target`'s view - the
         translation, with the original underneath; or just the original

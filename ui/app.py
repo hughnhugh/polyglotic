@@ -59,7 +59,11 @@ class Controller(QObject):
     def __init__(self, targets, pipeline_factory, model_size, capture_mic, bridge_port):
         super().__init__()
         saved = settings.load()
-        self.targets = targets                    # shared with process_segment - edited in place
+        self.targets = targets                    # languages with an overlay
+        # target -> its overlay's second language (see Caption.lines_for)
+        self.second_languages = {t: c for t, c in saved["second_languages"].items() if c}
+        self.translate_into: "list[str]" = []     # shared with process_segment - edited in place
+        self._sync_translate_into()
         self.prefs = saved["overlay"]
         self.prefs_version = 0
         self.locked = saved["locked"]
@@ -76,7 +80,8 @@ class Controller(QObject):
         overlay_core.register_broadcast_queues([self.caption_queue])  # notices arrive with the captions
         self._status_queue = queue.Queue()
         overlay_core.status.subscribe(self._status_queue)
-        self.pipeline = pipeline_factory(self.caption_queue, model_size, capture_mic, bridge_port)
+        self.pipeline = pipeline_factory(self.caption_queue, self.translate_into, model_size, capture_mic, bridge_port,
+                                         saved["mic_device"])
 
         self._poll = QTimer(self, interval=40, timeout=self._drain)
 
@@ -113,10 +118,29 @@ class Controller(QObject):
 
     # -- targets / overlays -----------------------------------------------------
 
+    def _sync_translate_into(self):
+        """Every language captions are translated into: the overlays' and
+        their second languages."""
+        wanted = list(dict.fromkeys([*self.targets, *(self.second_languages[t] for t in self.targets
+                                                      if t in self.second_languages)]))
+        self.translate_into[:] = wanted
+
+    def set_second_language(self, target, code):
+        if code:
+            self.second_languages[target] = code
+        else:
+            self.second_languages.pop(target, None)
+        self._sync_translate_into()
+        settings.update(second_languages=dict(self.second_languages))
+        if target in self.overlays:
+            self.overlays[target].refresh(force=True)
+        self.prefs_changed.emit()
+
     def add_target(self, code):
         if code in self.targets:
             return
         self.targets.append(code)
+        self._sync_translate_into()
         self._open_overlay(code)
         settings.update(targets=list(self.targets))
         self.targets_changed.emit()
@@ -125,6 +149,7 @@ class Controller(QObject):
         if code not in self.targets:
             return
         self.targets.remove(code)
+        self._sync_translate_into()
         overlay = self.overlays.pop(code, None)
         if overlay is not None:
             overlay.close()
@@ -198,6 +223,18 @@ class Controller(QObject):
     @property
     def mic_enabled(self):
         return self.pipeline.mic_capture.enabled
+
+    def mic_devices(self):
+        return self.pipeline.mic_capture.devices()
+
+    @property
+    def mic_device(self):
+        return self.pipeline.mic_capture.device_name
+
+    def set_mic_device(self, name):
+        self.pipeline.mic_capture.set_device(name)
+        settings.update(mic_device=name)
+        self.state_changed.emit()
 
     def set_mic_enabled(self, on):
         self.pipeline.mic_capture.set_enabled(on)
@@ -348,8 +385,8 @@ def run(make_process_segment, targets, model_size, capture_mic, bridge_port):
     app.setFont(theme.ui_font())
     app.setStyleSheet(theme.STYLESHEET)
 
-    def pipeline_factory(caption_queue, model, mic, port):
-        return overlay_core.Pipeline(make_process_segment(targets, caption_queue), model, mic, port)
+    def pipeline_factory(caption_queue, translate_into, model, mic, port, mic_device):
+        return overlay_core.Pipeline(make_process_segment(translate_into, caption_queue), model, mic, port, mic_device)
 
     controller = Controller(targets, pipeline_factory, model_size, capture_mic, bridge_port)
 

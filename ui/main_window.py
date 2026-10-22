@@ -163,7 +163,8 @@ class HomePage(QWidget):
         quick.add(SettingRow("Show overlays", "Ctrl+Alt+H", self.hide_toggle))
         self.original_toggle = ToggleSwitch(controller.prefs["show_original"])
         self.original_toggle.toggled.connect(lambda on: controller.set_pref("show_original", on))
-        quick.add(SettingRow("Show the original under translations", None, self.original_toggle))
+        quick.add(SettingRow("Show what was said above translations", "White is what was said; yellow is "
+                             "always a translation.", self.original_toggle))
         content.addWidget(quick)
 
         # -- where captions go -------------------------------------------------------
@@ -430,6 +431,15 @@ class LanguagesPage(QWidget):
         spoken.add(row)
         content.addWidget(spoken)
 
+        second = Card("Second language", "Lines already in an overlay's language - usually your own - get "
+                                         "no translation there. Pick a second language and they get a yellow "
+                                         "translation into it too, so someone reading that overlay in another "
+                                         "language can follow you.")
+        self.second_rows = QVBoxLayout()
+        self.second_rows.setSpacing(6)
+        second.add(self.second_rows)
+        content.addWidget(second)
+
         names = Card("Names & slang", "Words the speech model should spell your way - people's names, game "
                                       "terms, in-jokes. Separate them with commas.")
         self.context = QLineEdit(speech_options["context"])
@@ -450,7 +460,31 @@ class LanguagesPage(QWidget):
         self._refresh_targets()
         self._refresh_preview()
 
+    def _refresh_second_rows(self):
+        while self.second_rows.count():
+            item = self.second_rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if not self.c.targets:
+            self.second_rows.addWidget(label("Choose a language above first.", "Dim"))
+            return
+        for target in self.c.targets:
+            combo = QComboBox()
+            combo.addItem("None", None)
+            for code in PINNED_LANGUAGES + sorted((c for c in LANGUAGE_NAMES if c not in PINNED_LANGUAGES),
+                                                  key=lambda c: LANGUAGE_NAMES[c]):
+                if code != target:
+                    combo.addItem(LANGUAGE_NAMES[code], code)
+            combo.setCurrentIndex(max(0, combo.findData(self.c.second_languages.get(target))))
+            combo.setFixedWidth(200)
+            combo.currentIndexChanged.connect(lambda _, combo=combo, target=target:
+                                              self.c.set_second_language(target, combo.currentData()))
+            name = LANGUAGE_NAMES.get(target, target)
+            self.second_rows.addWidget(SettingRow(f"{name} overlay", f"Lines already in {name} also translated "
+                                                  "into:", combo))
+
     def _refresh_targets(self):
+        self._refresh_second_rows()
         blocked = self.list.blockSignals(True)
         for i in range(self.list.count()):
             item = self.list.item(i)
@@ -577,7 +611,8 @@ class CaptionsPage(QWidget):
                             language))
         self.original = ToggleSwitch(prefs["show_original"])
         self.original.toggled.connect(lambda on: controller.set_pref("show_original", on))
-        look.add(SettingRow("Original under the translation", None, self.original))
+        look.add(SettingRow("What was said, above the translation", "White is what was said, in its own "
+                            "language; yellow is always a translation. Off: just the yellow line.", self.original))
         content.addWidget(look)
 
         timing = Card("Timing")
@@ -676,7 +711,12 @@ class AudioPage(QWidget):
         system.add(self.system_line)
         content.addWidget(system)
 
-        mic = Card("Microphone", "Your own speech, from Windows' default microphone.")
+        mic = Card("Microphone", "Your own speech.")
+        self.mic_choice = QComboBox()
+        self.mic_choice.setMinimumWidth(280)
+        self.mic_choice.activated.connect(lambda _: controller.set_mic_device(self.mic_choice.currentData()))
+        mic.add(SettingRow("Microphone", "Switches straight away. \u201cWindows default\u201d follows whatever "
+                           "Windows' sound settings pick.", self.mic_choice))
         self.mic_on = ToggleSwitch(controller.mic_enabled)
         self.mic_on.toggled.connect(controller.set_mic_enabled)
         mic.add(SettingRow("Listen to my microphone", None, self.mic_on))
@@ -713,6 +753,22 @@ class AudioPage(QWidget):
         controller.state_changed.connect(self.refresh)
         QTimer(self, interval=3000, timeout=self.refresh).start()
         self.refresh()
+
+    def showEvent(self, event):  # noqa: N802
+        self._fill_mic_choice()  # a headset plugged in since shows up when you come back
+
+    def _fill_mic_choice(self):
+        devices = self.c.mic_devices()
+        current = self.c.mic_device
+        if current and current not in devices:
+            devices.append(current)  # chosen but unplugged - keep it showing
+        blocked = self.mic_choice.blockSignals(True)
+        self.mic_choice.clear()
+        self.mic_choice.addItem("Windows default", None)
+        for name in devices:
+            self.mic_choice.addItem(name, name)
+        self.mic_choice.setCurrentIndex(max(0, self.mic_choice.findData(current)))
+        self.mic_choice.blockSignals(blocked)
 
     def refresh(self):
         status = self.c.status

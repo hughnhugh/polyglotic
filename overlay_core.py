@@ -294,8 +294,9 @@ class MicCapture:
     (checkbox-driven) before the audio pipeline finishes loading - toggling
     early just changes what happens once bind() runs after load."""
 
-    def __init__(self, initially_on):
+    def __init__(self, initially_on, device_name=None):
         self._desired_on = initially_on
+        self._device_name = device_name  # None = Windows' default microphone
         self._p = None
         self._model_holder = None
         self._executor = None
@@ -311,6 +312,24 @@ class MicCapture:
     @property
     def active(self):
         return self._thread is not None
+
+    @property
+    def device_name(self):
+        return self._device_name
+
+    def devices(self):
+        """The microphones to choose from - empty until the pipeline's up."""
+        return list_input_devices(self._p) if self._p is not None else []
+
+    def set_device(self, name):
+        """Switches microphone (None = Windows' default) - restarting
+        capture on it right away if it's running."""
+        self._device_name = name
+        if self._p is not None and self._desired_on:
+            def _switch():
+                self._stop_now()
+                self._start_now()
+            threading.Thread(target=_switch, daemon=True).start()
 
     def bind(self, p, model_holder, executor, process_segment_fn):
         self._p, self._model_holder, self._executor = p, model_holder, executor
@@ -346,7 +365,7 @@ class MicCapture:
             return  # toggled off again while VAD was loading - abandon
 
         mic_q: "queue.Queue" = queue.Queue()
-        stream, info, channels = open_mic_stream(self._p, make_pyaudio_callback(mic_q))
+        stream, info, channels = open_mic_stream(self._p, make_pyaudio_callback(mic_q), self._device_name)
         if not self._desired_on:
             stream.close()
             status.set("mic", "Off")
@@ -469,23 +488,40 @@ def open_loopback_stream(p, callback):
     return stream, default_speakers
 
 
-def open_mic_stream(p, callback):
-    default_mic = p.get_default_input_device_info()
-    channels = min(int(default_mic["maxInputChannels"]), 2) or 1
+def _input_devices(p):
+    """Windows' microphones as WASAPI devices - each once, full names, no
+    loopbacks (the other host APIs list the same mics again)."""
+    wasapi = p.get_host_api_info_by_type(pyaudio.paWASAPI)["index"]
+    devices = (p.get_device_info_by_index(i) for i in range(p.get_device_count()))
+    return [d for d in devices if d["hostApi"] == wasapi and d["maxInputChannels"] > 0
+            and not d.get("isLoopbackDevice", False)]
 
-    broadcast(f"[Capturing mic: {default_mic['name']}]")
-    status.set("mic", f"Capturing: {default_mic['name']}")
+
+def list_input_devices(p):
+    return [d["name"] for d in _input_devices(p)]
+
+
+def open_mic_stream(p, callback, device_name=None):
+    """Opens `device_name`, or Windows' default microphone if that's None or
+    no longer plugged in."""
+    mic = next((d for d in _input_devices(p) if d["name"] == device_name), None) if device_name else None
+    if mic is None:
+        mic = p.get_default_input_device_info()
+    channels = min(int(mic["maxInputChannels"]), 2) or 1
+
+    broadcast(f"[Capturing mic: {mic['name']}]")
+    status.set("mic", f"Capturing: {mic['name']}")
 
     stream = p.open(
         format=pyaudio.paInt16,
         channels=channels,
-        rate=int(default_mic["defaultSampleRate"]),
+        rate=int(mic["defaultSampleRate"]),
         frames_per_buffer=1024,
         input=True,
-        input_device_index=default_mic["index"],
+        input_device_index=mic["index"],
         stream_callback=callback,
     )
-    return stream, default_mic, channels
+    return stream, mic, channels
 
 
 def resample_linear(audio, orig_sr, target_sr):
@@ -941,11 +977,11 @@ class Pipeline:
     reconfigure it live through model_holder / mic_capture /
     set_bridge_port(), and shutdown() on exit."""
 
-    def __init__(self, process_segment_fn, model_size, capture_mic, bridge_port, device="cuda",
+    def __init__(self, process_segment_fn, model_size, capture_mic, bridge_port, mic_device=None, device="cuda",
                  compute_type="float16"):
         self.process_segment_fn = process_segment_fn
         self.model_holder = ModelHolder(model_size, device=device, compute_type=compute_type)
-        self.mic_capture = MicCapture(initially_on=capture_mic)
+        self.mic_capture = MicCapture(initially_on=capture_mic, device_name=mic_device)
         self.bridge_port = bridge_port
         self._stop_event = threading.Event()
 

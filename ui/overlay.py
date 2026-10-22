@@ -26,12 +26,34 @@ from ui import theme
 PAD = 14
 FADE_STEP = 0.08          # per 30ms tick - about a third of a second to fade
 HISTORY = 150             # captions an overlay keeps to scroll back through
-BASE_PRIMARY_PX = 22
-BASE_SECONDARY_PX = 18    # the original - big enough to read at a glance, not to compete
+# One colour rule everywhere: white is what was said, in its own language;
+# yellow, under it, is always a translation. Both the same size - the
+# yellow line is the one most readers need, so it isn't demoted.
+BASE_TEXT_PX = 21
 BASE_SPEAKER_PX = 13
-# The original speech under a translation, in classic subtitle yellow - set
-# apart from the white translation, and easy to pick out.
-ORIGINAL_COLOR = "#ffd76e"
+TRANSLATION_COLOR = "#ffd76e"   # classic subtitle yellow
+
+
+def caption_lines(caption, target, second, prefs):
+    """[(text, colour, language)] for a caption in `target`'s overlay: what
+    was said (white) - left out if the overlay hides originals and there's
+    a translation - then its translation (yellow), into the target or,
+    for a line already in it, into the overlay's second language. A live
+    caption's last line trails off."""
+    said, translation = caption.lines_for(target, second)
+    in_target = caption.translations.get(target, ("", False))[1]
+    lines = []
+    if translation is None or prefs["show_original"]:
+        white = QColor("white")
+        if caption.live:
+            white.setAlphaF(0.85)
+        # said only differs from native when it's been put in the target's script (zh -> zh-hant)
+        lines.append([said, white, target if said != caption.native else caption.lang])
+    if translation is not None:
+        lines.append([translation, QColor(TRANSLATION_COLOR), target if in_target else second])
+    if caption.live:
+        lines[-1][0] += " \u2026"
+    return [tuple(line) for line in lines]
 
 
 class OutlinedText(QWidget):
@@ -190,13 +212,12 @@ class CaptionBlock(QWidget):
         head.addStretch(1)
         self.primary = OutlinedText()
         self.secondary = OutlinedText()
-        for part in (self.head, self.primary, self.secondary):
+        for part in (self.head, self.primary, self.secondary):  # primary: white (said), secondary: yellow
             layout.addWidget(part)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-    def show_caption(self, caption, target, prefs):
+    def show_caption(self, caption, target, prefs, second=None):
         scale = prefs["text_scale"]
-        primary, original = caption.text_for(target)
 
         show_speaker = prefs["show_speakers"] and bool(caption.speaker)
         show_language = prefs["show_language"] and bool(caption.lang)
@@ -211,21 +232,13 @@ class CaptionBlock(QWidget):
                                                                                 QFont.Weight.Normal),
                               "#aab2c0", 1.6 * scale)
 
-        # A live caption is still being spoken - slightly softer, and it
-        # trails off, until the final version replaces it.
-        color = QColor("white")
-        if caption.live:
-            color.setAlphaF(0.85)
-        self.primary.set(primary + (" \u2026" if caption.live else ""),
-                         _caption_font(BASE_PRIMARY_PX * scale, QFont.Weight.Medium, primary,
-                                       target if original else caption.lang), color, 1.9 * scale)
-
-        show_original = prefs["show_original"] and bool(original)
-        self.secondary.setVisible(show_original)
-        if show_original:
-            self.secondary.set(original, _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium, original,
-                                                       caption.lang), ORIGINAL_COLOR,
-                               1.6 * scale)
+        lines = caption_lines(caption, target, second, prefs)
+        for widget, line in zip((self.primary, self.secondary), [*lines, None]):
+            widget.setVisible(line is not None)
+            if line is not None:
+                text, color, lang = line
+                widget.set(text, _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang), color,
+                           1.8 * scale)
 
 
 def _text_paths(text, font, width, x=0.0, y=0.0):
@@ -310,7 +323,7 @@ class CaptionCanvas(QWidget):
 
     # -- content ----------------------------------------------------------------
 
-    def set_captions(self, captions, target, prefs):
+    def set_captions(self, captions, target, prefs, second=None):
         """Brings the canvas up to date with `captions` (top to bottom)."""
         width = self.width()
         keys = [c.key for c in captions]
@@ -323,22 +336,23 @@ class CaptionCanvas(QWidget):
             item = self.items.get(caption.key)
             if item is None:
                 item = self.items[caption.key] = _Item(caption.key)
-            signature = (caption.speaker, caption.lang, caption.langs, caption.live, caption.text_for(target), width,
+            lines = caption_lines(caption, target, second, prefs)
+            signature = (caption.speaker, caption.lang, caption.langs, caption.live,
+                         tuple((text, color.name(QColor.NameFormat.HexArgb)) for text, color, _ in lines), width,
                          tuple(sorted(prefs.items())))
             if signature != item.signature:
-                primary = caption.text_for(target)[0]
+                primary = " ".join(text for text, _, _ in lines)
                 rewritten = item.signature is not None and not primary.startswith(item.text.rstrip(" …"))
                 if rewritten:
                     item.old_pixmap, item.cross = item.pixmap, 0.0
                 item.signature, item.text = signature, primary
-                parts, item.height = self._build(caption, target, prefs, width)
+                parts, item.height = self._build(caption, lines, prefs, width)
                 item.pixmap = self._render(parts, width, item.height)
         self.order = keys
         self._layout()
 
-    def _build(self, caption, target, prefs, width):
+    def _build(self, caption, lines, prefs, width):
         scale = prefs["text_scale"]
-        primary, original = caption.text_for(target)
         parts, y = [], 0.0
         pad = 3  # room for the outline
         show_speaker = prefs["show_speakers"] and bool(caption.speaker)
@@ -355,19 +369,12 @@ class CaptionCanvas(QWidget):
                 path, h = _text_paths(spoken_languages_label(caption), lang_font, width, x, y)
                 parts.append((path, QColor("#aab2c0"), 1.6 * scale))
             y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
-        color = QColor("white")
-        if caption.live:
-            color.setAlphaF(0.85)
-        text = primary + (" …" if caption.live else "")
-        font = _caption_font(BASE_PRIMARY_PX * scale, QFont.Weight.Medium, primary, target if original else caption.lang)
-        path, h = _text_paths(text, font, width - 2 * pad, pad, y)
-        parts.append((path, color, 1.9 * scale))
-        y += h
-        if prefs["show_original"] and original:
-            y += self.LINE_GAP
-            font = _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium, original, caption.lang)
-            path, h = _text_paths(original, font, width - 2 * pad, pad, y)
-            parts.append((path, QColor(ORIGINAL_COLOR), 1.6 * scale))
+        for i, (text, color, lang) in enumerate(lines):
+            if i:
+                y += self.LINE_GAP
+            font = _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang)
+            path, h = _text_paths(text, font, width - 2 * pad, pad, y)
+            parts.append((path, color, 1.8 * scale))
             y += h
         return parts, y + pad
 
@@ -654,7 +661,8 @@ class CaptionOverlay(QWidget):
         self._shown_version = version
         shown = self._captions()
         self._shown_keys = {c.key for c in shown}
-        self.canvas.set_captions(shown, self.target, self.controller.prefs)
+        self.canvas.set_captions(shown, self.target, self.controller.prefs,
+                                 self.controller.second_languages.get(self.target))
         newest = (shown[-1].key, shown[-1].text_for(self.target)[0]) if shown else None
         if newest != self._last_seen:
             self._last_seen = newest

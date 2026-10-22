@@ -89,10 +89,17 @@ changing things and reading back. Closing it keeps the app running in the
 ### The subtitle overlays
 
 One per language you translate into, centred near the bottom of the screen
-to start with. Captions run newest at the bottom: the translation large,
-the original speech underneath in subtitle yellow, and who said it in their own colour
-(names come from the Discord plugin; your own speech shows as "You"),
-with the language it was spoken in beside the name.
+to start with. Captions run newest at the bottom, with one colour rule:
+**white is what was said**, in its own language, and **yellow, under it,
+is always a translation** - into the overlay's language. Above each is who
+said it, in their own colour (names come from the Discord plugin; your own
+speech shows as "You"), and the language it was spoken in. Lines already in
+the overlay's language have no yellow line - unless you give the overlay a
+**second language** (Languages page): then they're translated into that,
+so one overlay serves readers of both. E.g. an English overlay with
+Chinese as its second language shows Chinese speech with English under it,
+and your English with Chinese under it.
+
 Text has a dark outline, like film subtitles, so it stays readable over
 bright scenes even with the background panel turned right down. A caption
 still being spoken updates live, trailing off with `…`, and settles when
@@ -146,13 +153,14 @@ game to borderless.
     the speech model sometimes "transcribes" the list itself - a caption
     that's just names read back is dropped.
 - **Captions** - how the overlays look and behave, with a live preview:
-  text size, background opacity, speaker names, the original under
+  text size, background opacity, speaker names, the white line above
   translations, how soon they fade, and live
   update timing (below). Also resets overlay positions.
-- **Audio** - system audio and microphone (both Windows' defaults - change
-  those in Windows' sound settings), whether your own speech is captioned
-  (off saves GPU time), and the Discord plugin's connection, who's in the
-  call, and its port.
+- **Audio** - which microphone (Windows' default, or pick one - it
+  switches straight away and is remembered), system audio (Windows'
+  default output), whether your own speech is captioned (off saves GPU
+  time), and the Discord plugin's connection, who's in the call, and its
+  port.
 - **Models** - the speech model (switching takes a few seconds, during
   which captions pause) and the translator's status.
 

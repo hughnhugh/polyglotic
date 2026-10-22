@@ -25,8 +25,12 @@ def _default_model():
 
 DEFAULTS = {
     "targets": ["en"],
+    # target -> a second language its overlay translates lines already in
+    # the target's language into (shown in yellow, like every translation)
+    "second_languages": {},
     "model": None,          # filled in by load() - depends on what's installed
     "mic": True,
+    "mic_device": None,     # microphone by name; None = Windows' default
     "caption_mic": True,    # caption your own speech (the mic is still captured for nothing else)
     "bridge_port": 8765,
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES

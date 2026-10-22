@@ -70,6 +70,21 @@ def main():
     assert [t for _, t, _ in _texts(small)] == ["line 2", "line 3", "line 4"]
     print("OK: history trimmed to the newest captions")
 
+    # White is what was said; yellow is a translation - into the overlay's
+    # language, or for a line already in it, into its second language.
+    cap = captions.Caption(key=1, speaker="Caleb", is_you=False, lang="en", native="Who took the car",
+                           translations={"en": ("Who took the car", False), "zh": ("谁开走了车", True)},
+                           group=None, live=False, delay=None, proc=None)
+    assert cap.lines_for("en") == ("Who took the car", None)
+    assert cap.lines_for("en", second="zh") == ("Who took the car", "谁开走了车")
+    assert cap.lines_for("zh") == ("Who took the car", "谁开走了车")
+    cap = captions.Caption(key=2, speaker="marina", is_you=False, lang="zh", native="我觉得很好",
+                           translations={"en": ("I think it's great", True), "zh-hant": ("我覺得很好", False)},
+                           group=None, live=False, delay=None, proc=None)
+    assert cap.lines_for("en", second="zh-hant") == ("我觉得很好", "I think it's great")
+    assert cap.lines_for("zh-hant", second="en") == ("我覺得很好", "I think it's great")
+    print("OK: white said / yellow translation, with second languages")
+
     assert captions.join_text(["Hello there.", "how are you"]) == "Hello there. how are you"
     assert captions.join_text(["OK", "我们走"]) == "OK我们走"
     print("ALL OK")
