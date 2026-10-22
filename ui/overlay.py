@@ -16,17 +16,16 @@ the bottom) catches it up.
 import math
 import time
 
-from PySide6.QtCore import QEasingCurve, QEvent, QPoint, QPointF, QPropertyAnimation, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QTextLayout, QTextOption
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                           QTextLayout, QTextOption)
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
 
 from ui import theme
 
 PAD = 14
 FADE_STEP = 0.08          # per 30ms tick - about a third of a second to fade
 HISTORY = 150             # captions an overlay keeps to scroll back through
-GLIDE_MS = 260            # how long new lines take to slide into place
 BASE_PRIMARY_PX = 22
 BASE_SECONDARY_PX = 18    # the original - big enough to read at a glance, not to compete
 BASE_SPEAKER_PX = 13
@@ -224,12 +223,316 @@ class CaptionBlock(QWidget):
                                1.6 * scale)
 
 
+def _text_paths(text, font, width, x=0.0, y=0.0):
+    """(path, height): `text` word-wrapped at `width` as one QPainterPath,
+    its top-left at (x, y)."""
+    layout = QTextLayout(text, font)
+    option = QTextOption()
+    option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
+    layout.setTextOption(option)
+    layout.beginLayout()
+    path, h = QPainterPath(), 0.0
+    while True:
+        line = layout.createLine()
+        if not line.isValid():
+            break
+        line.setLineWidth(max(10.0, width))
+        line.setPosition(QPointF(0, h))
+        segment = text[line.textStart():line.textStart() + line.textLength()].rstrip()
+        if segment:
+            path.addText(QPointF(x, y + h + line.ascent()), font, segment)
+        h += line.height()
+    layout.endLayout()
+    return path, h
+
+
+class _Item:
+    """One caption as the canvas draws it: its text as outlined paths, and
+    where it is / is heading on screen."""
+
+    def __init__(self, key):
+        self.key = key
+        self.signature = None
+        self.pixmap = None       # the caption drawn once (outlined text is costly) - frames just place it
+        self.text = ""           # primary text, to tell growing (typed on) from rewritten (crossfaded)
+        self.height = 0.0
+        self.y = None            # on-screen top, sprung toward target_y
+        self.vy = 0.0            # its velocity, px/s
+        self.target_y = 0.0
+        self.alpha = 0.0         # fades in on arrival, out on removal
+        self.target_alpha = 1.0
+        self.old_pixmap = None   # the previous text while crossfading to a rewrite
+        self.cross = 1.0         # 0 -> 1: old text out, new text in
+        self.ghost = False       # removed - fading out where it was, taking no space
+
+
+class CaptionCanvas(QWidget):
+    """Draws an overlay's captions and animates every change: captions ease
+    to new positions when anything above or below them changes height (a
+    new caption, a live caption growing a line, a join), arrive fading and
+    rising into place, leave fading out while the rest close the gap, and
+    crossfade when their text is rewritten (text that only grows just
+    extends). The wheel scrolls smoothly too. One painted surface rather
+    than a widget per caption - widgets resize in single frames, which is
+    what read as flicker."""
+
+    LINE_GAP = 4         # between a caption's speaker line, translation and original
+    CAPTION_GAP = 14     # between captions
+    # Positions move on a critically damped spring: they start from rest,
+    # accelerate, and settle without overshoot - and keep their momentum
+    # when the target changes mid-move (a live caption updating while
+    # things are still sliding), so there's never a jerk. ~0.3s to settle.
+    OMEGA = 20.0         # rad/s - the spring's stiffness
+    FADE_TAU = 0.07      # seconds - fade in/out time constant
+    CROSSFADE = 0.2      # seconds
+    RISE = 14            # px a new caption rises as it fades in
+
+    def __init__(self, overlay):
+        super().__init__(overlay)
+        self.overlay = overlay
+        self.items: "dict[int, _Item]" = {}
+        self.order: "list[int]" = []      # keys top to bottom (ghosts excluded)
+        self.ghosts: "list[_Item]" = []
+        self.scroll = 0.0                 # content scrolled off the top, animated toward target_scroll
+        self.target_scroll = 0.0
+        self.following = True
+        self.on_scrolled_back = None      # set by the overlay
+        self.on_back_at_bottom = None
+        self._last_frame = time.monotonic()
+        self._timer = QTimer(self, interval=8, timeout=self._animate)
+        self._timer.setTimerType(Qt.TimerType.PreciseTimer)  # the default ticks unevenly on Windows
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    # -- content ----------------------------------------------------------------
+
+    def set_captions(self, captions, target, prefs):
+        """Brings the canvas up to date with `captions` (top to bottom)."""
+        width = self.width()
+        keys = [c.key for c in captions]
+        for key in [k for k in self.order if k not in set(keys)]:
+            item = self.items.pop(key)
+            if item.y is not None and -item.height < item.y < self.height():
+                item.ghost, item.target_alpha = True, 0.0   # visible - fade it out
+                self.ghosts.append(item)
+        for caption in captions:
+            item = self.items.get(caption.key)
+            if item is None:
+                item = self.items[caption.key] = _Item(caption.key)
+            signature = (caption.speaker, caption.lang, caption.live, caption.text_for(target), width,
+                         tuple(sorted(prefs.items())))
+            if signature != item.signature:
+                primary = caption.text_for(target)[0]
+                rewritten = item.signature is not None and not primary.startswith(item.text.rstrip(" …"))
+                if rewritten:
+                    item.old_pixmap, item.cross = item.pixmap, 0.0
+                item.signature, item.text = signature, primary
+                parts, item.height = self._build(caption, target, prefs, width)
+                item.pixmap = self._render(parts, width, item.height)
+        self.order = keys
+        self._layout()
+
+    def _build(self, caption, target, prefs, width):
+        scale = prefs["text_scale"]
+        primary, original = caption.text_for(target)
+        parts, y = [], 0.0
+        pad = 3  # room for the outline
+        show_speaker = prefs["show_speakers"] and bool(caption.speaker)
+        show_language = prefs["show_language"] and bool(caption.lang)
+        if show_speaker or show_language:
+            font = _caption_font(BASE_SPEAKER_PX * scale, QFont.Weight.DemiBold)
+            x = pad
+            if show_speaker:
+                path, h = _text_paths(caption.speaker, font, width, x, y)
+                parts.append((path, QColor(theme.speaker_color(caption.speaker, caption.is_you)), 1.6 * scale))
+                x += QFontMetricsF(font).horizontalAdvance(caption.speaker) + 8 * scale
+            if show_language:
+                lang_font = _caption_font(BASE_SPEAKER_PX * scale, QFont.Weight.Normal)
+                path, h = _text_paths(spoken_language_name(caption.lang), lang_font, width, x, y)
+                parts.append((path, QColor("#aab2c0"), 1.6 * scale))
+            y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
+        color = QColor("white")
+        if caption.live:
+            color.setAlphaF(0.85)
+        text = primary + (" …" if caption.live else "")
+        font = _caption_font(BASE_PRIMARY_PX * scale, QFont.Weight.Medium, primary, target if original else caption.lang)
+        path, h = _text_paths(text, font, width - 2 * pad, pad, y)
+        parts.append((path, color, 1.9 * scale))
+        y += h
+        if prefs["show_original"] and original:
+            y += self.LINE_GAP
+            font = _caption_font(BASE_SECONDARY_PX * scale, QFont.Weight.Medium, original, caption.lang)
+            path, h = _text_paths(original, font, width - 2 * pad, pad, y)
+            parts.append((path, QColor(ORIGINAL_COLOR), 1.6 * scale))
+            y += h
+        return parts, y + pad
+
+    def _render(self, parts, width, height):
+        """The caption's outlined text, drawn once into a pixmap."""
+        ratio = self.devicePixelRatioF()
+        pixmap = QPixmap(max(1, math.ceil(width * ratio)), max(1, math.ceil(height * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.GlobalColor.transparent)
+        p = QPainter(pixmap)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        for path, color, outline in parts:
+            pen = QPen(QColor(0, 0, 0, 235), outline * 2)
+            pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.strokePath(path, pen)
+            p.fillPath(path, color)
+        p.end()
+        return pixmap
+
+    def _content_height(self):
+        heights = [self.items[k].height for k in self.order]
+        return sum(heights) + self.CAPTION_GAP * max(0, len(heights) - 1)
+
+    def max_scroll(self):
+        return max(0.0, self._content_height() - self.height())
+
+    def _layout(self):
+        """Where every caption should be: stacked top to bottom, the whole
+        stack sitting at the bottom when it's shorter than the canvas."""
+        total = self._content_height()
+        if self.following:
+            self.target_scroll = max(0.0, total - self.height())
+        self.target_scroll = min(max(0.0, self.target_scroll), self.max_scroll())
+        top = max(0.0, self.height() - total) - self.target_scroll
+        for key in self.order:
+            item = self.items[key]
+            item.target_y = top
+            if item.y is None:  # arriving: fade in, rising into place
+                item.y, item.alpha = top + self.RISE, 0.0
+            top += item.height + self.CAPTION_GAP
+        self._start()
+
+    # -- scrolling ----------------------------------------------------------------
+
+    def wheelEvent(self, event):  # noqa: N802
+        self.scroll_by(-event.angleDelta().y() / 120 * 60)
+        event.accept()
+
+    def scroll_by(self, dy):
+        self.target_scroll = min(max(0.0, self.target_scroll + dy), self.max_scroll())
+        at_bottom = self.target_scroll >= self.max_scroll() - 2
+        if self.following and not at_bottom:
+            self.following = False
+            if self.on_scrolled_back:
+                self.on_scrolled_back()
+        elif not self.following and at_bottom and self.on_back_at_bottom:
+            self.on_back_at_bottom()
+        self._layout()
+
+    def follow(self):
+        self.following = True
+        self._layout()
+
+    # -- animation ----------------------------------------------------------------
+
+    def _start(self):
+        if not self._timer.isActive():
+            self._last_frame = time.monotonic()
+            self._timer.start()
+
+    def _spring(self, y, v, target, dt):
+        """One step of a critically damped spring - (y, v) after dt."""
+        steps = max(1, math.ceil(dt / 0.004))  # small substeps keep it stable whatever the frame time
+        h = dt / steps
+        for _ in range(steps):
+            v += (-self.OMEGA ** 2 * (y - target) - 2 * self.OMEGA * v) * h
+            y += v * h
+        return y, v
+
+    def _animate(self):
+        now = time.monotonic()
+        dt = min(0.1, now - self._last_frame)
+        self._last_frame = now
+        moving = False
+        old_scroll = self.scroll
+        self.scroll, self._scroll_v = self._spring(self.scroll, getattr(self, "_scroll_v", 0.0), self.target_scroll, dt)
+        if abs(self.target_scroll - self.scroll) < 0.25 and abs(self._scroll_v) < 2:
+            self.scroll, self._scroll_v = self.target_scroll, 0.0
+        else:
+            moving = True
+        fade = 1 - math.exp(-dt / self.FADE_TAU)
+        for item in list(self.items.values()) + self.ghosts:
+            if item.ghost:
+                item.y -= self.scroll - old_scroll  # stays put on screen while the rest move
+            elif item.y is not None:
+                item.y, item.vy = self._spring(item.y, item.vy, item.target_y, dt)
+                if abs(item.target_y - item.y) < 0.25 and abs(item.vy) < 2:
+                    item.y, item.vy = item.target_y, 0.0
+                else:
+                    moving = True
+            if abs(item.target_alpha - item.alpha) > 0.01:
+                item.alpha += (item.target_alpha - item.alpha) * fade
+                moving = True
+            else:
+                item.alpha = item.target_alpha
+            if item.cross < 1.0:
+                item.cross = min(1.0, item.cross + dt / self.CROSSFADE)
+                moving = True
+                if item.cross >= 1.0:
+                    item.old_pixmap = None
+        self.ghosts = [g for g in self.ghosts if g.alpha > 0.01]
+        if not moving and not self.ghosts:
+            self._timer.stop()
+        self.overlay.update()  # the panel behind follows the captions
+
+    # -- drawing ----------------------------------------------------------------
+
+    def visible_extent(self):
+        """(top, bottom) of what's drawn, in canvas coordinates, or None."""
+        spans = [(max(0.0, i.y), min(float(self.height()), i.y + i.height))
+                 for i in [*self.items.values(), *self.ghosts]
+                 if i.y is not None and i.alpha > 0.02 and i.y + i.height > 0 and i.y < self.height()]
+        if not spans:
+            return None
+        return min(s[0] for s in spans), max(s[1] for s in spans)
+
+    FADE_EDGE = 26  # px over which captions scrolled off the top dissolve
+
+    def paintEvent(self, event):  # noqa: N802
+        # Drawn offscreen first, so the top edge can be faded without also
+        # erasing the panel behind.
+        ratio = self.devicePixelRatioF()
+        frame = QPixmap(max(1, math.ceil(self.width() * ratio)), max(1, math.ceil(self.height() * ratio)))
+        frame.setDevicePixelRatio(ratio)
+        frame.fill(Qt.GlobalColor.transparent)
+        p = QPainter(frame)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        cut_at_top = False
+        for item in [*self.ghosts, *(self.items[k] for k in self.order)]:
+            if (item.y is None or item.pixmap is None or item.y + item.height < 0 or item.y > self.height()
+                    or item.alpha <= 0.01):
+                continue
+            # Whole pixels: a pixmap at a fractional offset is resampled - softer text.
+            y = round(item.y)
+            cut_at_top = cut_at_top or y < 0
+            if item.old_pixmap is not None:
+                p.setOpacity(item.alpha * (1 - item.cross))
+                p.drawPixmap(0, y, item.old_pixmap)
+                p.setOpacity(item.alpha * item.cross)
+            else:
+                p.setOpacity(item.alpha)
+            p.drawPixmap(0, y, item.pixmap)
+        if cut_at_top:
+            fade = QLinearGradient(0, 0, 0, self.FADE_EDGE)
+            fade.setColorAt(0, QColor(0, 0, 0, 0))
+            fade.setColorAt(1, QColor(0, 0, 0, 255))
+            p.setOpacity(1.0)
+            p.setCompositionMode(QPainter.CompositionMode.CompositionMode_DestinationIn)
+            p.fillRect(QRectF(0, 0, self.width(), self.FADE_EDGE), fade)
+        p.end()
+        QPainter(self).drawPixmap(0, 0, frame)
+
+
 class CaptionOverlay(QWidget):
     def __init__(self, controller, target, title):
         super().__init__(None, Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint
                          | Qt.WindowType.WindowStaysOnTopHint)
         self.controller = controller
         self.target = target
+        self.title = title
         self.setWindowTitle(f"{title} captions")
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
@@ -242,10 +545,7 @@ class CaptionOverlay(QWidget):
         self._last_seen = None    # (key, text) of the newest caption, to notice activity
         self._drag_from = None
         self._shown_version = None
-        self._following = True    # showing live captions; False while scrolled back (frozen)
-        self._frozen_at = None    # board.version when it froze, to count what's new since
-        self._auto_scrolling = False
-        self._blocks: "dict[int, CaptionBlock]" = {}  # caption key -> its block
+        self._shown_keys: "set[int]" = set()
 
         root = QVBoxLayout(self)
         root.setContentsMargins(PAD + 4, PAD, PAD + 4, PAD)
@@ -268,38 +568,10 @@ class CaptionOverlay(QWidget):
         head.addWidget(self._header_button("", f"Stop {title} captions", lambda: controller.remove_target(target)))
         root.addWidget(self.header)
 
-        # Captions scroll; a stretch above them keeps a few sitting at the bottom.
-        self.scroll = QScrollArea()
-        self.scroll.setWidgetResizable(True)
-        self.scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.scroll.setStyleSheet(f"""
-            QScrollArea, QScrollArea > QWidget > QWidget {{ background: transparent; }}
-            QScrollBar:vertical {{ background: transparent; width: 6px; margin: 2px 0; }}
-            QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.28); border-radius: 3px; min-height: 24px; }}
-            QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{
-                background: none; height: 0; }}""")
-        self.content = QWidget()
-        self.content.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.list = QVBoxLayout(self.content)
-        self.list.setContentsMargins(0, 0, 8, 0)
-        self.list.setSpacing(12)
-        self.list.addStretch(1)
-        self.placeholder = QLabel(f"{title} captions appear here")
-        self.placeholder.setStyleSheet(f"color: {theme.TEXT_DIM}; font-size: 15px;")
-        self.placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.list.addWidget(self.placeholder)
-        self.scroll.setWidget(self.content)
-        root.addWidget(self.scroll, 1)
-        bar = self.scroll.verticalScrollBar()
-        bar.valueChanged.connect(self._on_scrolled)
-        bar.rangeChanged.connect(lambda *_: self._stick_to_bottom())
-        # New lines glide up into place rather than jumping a whole line.
-        self._glide = QPropertyAnimation(bar, b"value", self)
-        self._glide.setDuration(GLIDE_MS)
-        self._glide.setEasingCurve(QEasingCurve.Type.OutCubic)
-        self.scroll.viewport().installEventFilter(self)  # a wheel turn interrupts a glide
+        self.canvas = CaptionCanvas(self)
+        self.canvas.on_scrolled_back = self._scrolled_back
+        self.canvas.on_back_at_bottom = self.go_live
+        root.addWidget(self.canvas, 1)
 
         # Floats over the captions while scrolled back.
         self.live_btn = QPushButton(self)
@@ -317,6 +589,7 @@ class CaptionOverlay(QWidget):
 
         self._save_timer = QTimer(self, singleShot=True, interval=400,
                                   timeout=lambda: controller.save_geometry(target, self.geometry()))
+        self._relayout_timer = QTimer(self, singleShot=True, interval=60, timeout=lambda: self.refresh(force=True))
         self._tick_timer = QTimer(self, interval=30, timeout=self._tick)
         self._tick_timer.start()
         self.set_locked(controller.locked)
@@ -348,116 +621,69 @@ class CaptionOverlay(QWidget):
 
     def _update_chrome(self):
         interactive = self._hovered and not self._locked
-        self.header.setVisible(interactive)
+        if self.header.isVisible() != interactive:
+            self.header.setVisible(interactive)
+            self._relayout_timer.start()  # the canvas changed height
         self.grip.setVisible(interactive)
-        self.placeholder.setVisible(interactive and not self._blocks)
-        policy = Qt.ScrollBarPolicy.ScrollBarAsNeeded if interactive else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
-        if self.scroll.verticalScrollBarPolicy() != policy:
-            self.scroll.setVerticalScrollBarPolicy(policy)
         self.setCursor(Qt.CursorShape.SizeAllCursor if interactive else Qt.CursorShape.ArrowCursor)
         self._place_live_button()
         self.update()
 
+    def _captions(self):
+        return [c for c in self.controller.board.captions
+                if self.target in c.translations or not c.translations][-HISTORY:]
+
     def refresh(self, force=False):
-        """Redraws from the caption board if it (or the look) changed - unless
-        scrolled back, where it holds still and just counts what's new."""
+        """Brings the captions up to date - unless scrolled back, where it
+        holds still and just counts what's new."""
         board = self.controller.board
-        if not self._following:
-            new = sum(1 for c in board.captions if c.key not in self._blocks and self.target in c.translations)
+        if not self.canvas.following:
+            new = sum(1 for c in board.captions if c.key not in self._shown_keys and self.target in c.translations)
             count = f"  ·  {new} new" if new else ""
             self.live_btn.setText(f"↓  Back to live{count}")
             self._place_live_button()
             return
-        version = (board.version, self.controller.prefs_version)
+        version = (board.version, self.controller.prefs_version, self.canvas.width(), self.canvas.height())
         if version == self._shown_version and not force:
             return
         self._shown_version = version
-        prefs = self.controller.prefs
-        shown = [c for c in board.captions if self.target in c.translations or not c.translations][-HISTORY:]
-
-        keep = {c.key for c in shown}
-        for key in [k for k in self._blocks if k not in keep]:
-            self._blocks.pop(key).deleteLater()
-        for i, caption in enumerate(shown):
-            block = self._blocks.get(caption.key)
-            if block is None:
-                block = self._blocks[caption.key] = CaptionBlock()
-            # 2 + i: after the stretch and the placeholder. insertWidget
-            # moves it if it's already there.
-            if self.list.indexOf(block) != 2 + i:
-                self.list.insertWidget(2 + i, block)
-            block.show_caption(caption, self.target, prefs)
-
+        shown = self._captions()
+        self._shown_keys = {c.key for c in shown}
+        self.canvas.set_captions(shown, self.target, self.controller.prefs)
         newest = (shown[-1].key, shown[-1].text_for(self.target)[0]) if shown else None
         if newest != self._last_seen:
             self._last_seen = newest
             if newest is not None:
                 self._last_activity = time.time()
-        self._update_chrome()
-        self._stick_to_bottom()
+        self.update()
 
     # -- scrolling ------------------------------------------------------------
 
-    def _stick_to_bottom(self):
-        """Following live, keep the newest caption in view - gliding there
-        when it's visible, so new lines slide in instead of jumping."""
-        if not self._following:
-            return
-        bar = self.scroll.verticalScrollBar()
-        target = bar.maximum()
-        if bar.value() == target and self._glide.state() != QPropertyAnimation.State.Running:
-            return
-        if not self.isVisible() or self._alpha < 0.05:
-            self._glide.stop()
-            self._auto_scrolling = True
-            bar.setValue(target)
-            self._auto_scrolling = False
-            return
-        self._glide.stop()
-        self._glide.setStartValue(bar.value())
-        self._glide.setEndValue(target)
-        self._glide.start()
-
-    def eventFilter(self, obj, event):  # noqa: N802
-        if event.type() == QEvent.Type.Wheel:
-            self._glide.stop()  # the reader takes over
-        return False
-
-    def _on_scrolled(self, value):
-        if self._auto_scrolling or self._glide.state() == QPropertyAnimation.State.Running:
-            return
-        bar = self.scroll.verticalScrollBar()
-        at_bottom = value >= bar.maximum() - 2
-        if self._following and not at_bottom:
-            self._following = False   # scrolled back - freeze here
-            self._frozen_at = self.controller.board.version
-            self.refresh()
-            self.live_btn.show()
-            self._place_live_button()
-        elif not self._following and at_bottom:
-            self.go_live()
+    def _scrolled_back(self):
+        self.live_btn.show()
+        self.refresh()
+        self._place_live_button()
 
     def go_live(self):
-        if self._following:
+        if self.canvas.following and not self.live_btn.isVisible():
             return
-        self._following = True
         self.live_btn.hide()
+        self.canvas.follow()
         self.refresh(force=True)
-        self._stick_to_bottom()
 
     def _place_live_button(self):
         if not self.live_btn.isVisible():
             return
         self.live_btn.adjustSize()
-        area = self.scroll.geometry()
+        area = self.canvas.geometry()
         self.live_btn.move(area.center().x() - self.live_btn.width() // 2, area.bottom() - self.live_btn.height() - 6)
         self.live_btn.raise_()
 
     def _tick(self):
         fade_after = self.controller.prefs["fade_after"]
-        if (self._hovered and not self._locked) or not self._following:
+        if (self._hovered and not self._locked) or not self.canvas.following:
             target = 1.0
-        elif not self._blocks:
+        elif not self.canvas.order:
             target = 0.0
         elif fade_after and time.time() - self._last_activity > fade_after:
             target = 0.0
@@ -470,38 +696,44 @@ class CaptionOverlay(QWidget):
     # -- painting -------------------------------------------------------------
 
     def paintEvent(self, event):  # noqa: N802
-        """The panel goes behind what's actually showing: the captions in
-        view (a few sit at the bottom, not the whole window) and the header."""
-        viewport = self.scroll.viewport()
-        view_rect = QRect(viewport.mapTo(self, QPoint(0, 0)), viewport.size())
+        """The panel goes behind what's actually showing - the captions in
+        view (moving with them as they animate) and the header."""
+        interactive = (self._hovered and not self._locked) or not self.canvas.following
         tops, bottoms = [], []
-        for w in (self.placeholder, *self._blocks.values()):
-            if w.isVisible():
-                r = QRect(w.mapTo(self, QPoint(0, 0)), w.size()).intersected(view_rect)
-                if not r.isEmpty():
-                    tops.append(r.top())
-                    bottoms.append(r.bottom())
+        extent = self.canvas.visible_extent()
+        if extent is not None:
+            offset = self.canvas.geometry().top()
+            tops.append(offset + extent[0])
+            bottoms.append(offset + extent[1])
+        elif interactive:
+            area = self.canvas.geometry()
+            tops.append(area.center().y() - 12)
+            bottoms.append(area.center().y() + 12)
         if self.header.isVisible():
             tops.append(self.header.geometry().top())
             bottoms.append(self.header.geometry().bottom())
         if not tops:
             return
         top, bottom = min(tops), max(bottoms)
-        panel = QRect(0, top - PAD, self.width(), bottom - top + 2 * PAD)
+        panel = QRectF(0, top - PAD, self.width(), bottom - top + 2 * PAD)
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         opacity = self.controller.prefs["opacity"]
-        if (self._hovered and not self._locked) or not self._following:
+        if interactive:
             opacity = max(opacity, 0.55)
             p.setPen(QPen(QColor(255, 255, 255, 40), 1))
         else:
             p.setPen(Qt.PenStyle.NoPen)
         p.setBrush(QColor(10, 12, 16, int(255 * opacity)))
         p.drawRoundedRect(panel.adjusted(1, 1, -1, -1), 14, 14)
+        if extent is None and interactive:
+            p.setPen(QColor(theme.TEXT_DIM))
+            p.drawText(self.canvas.geometry(), Qt.AlignmentFlag.AlignCenter, f"{self.title} captions appear here")
 
     def resizeEvent(self, event):  # noqa: N802
         self.grip.move(self.width() - self.grip.width() - 4, self.height() - self.grip.height() - 4)
         self._place_live_button()
+        self._relayout_timer.start()  # rewrap the text once the resize settles
         if event.oldSize().isValid() and self.isVisible():
             self._save_timer.start()
 

@@ -14,7 +14,7 @@ Closing it keeps the app running in the tray; Quit (sidebar or tray) exits.
 import html
 
 from PySide6.QtCore import QRect, Qt, QTimer
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QPushButton, QScrollArea,
                                QSlider, QSpinBox, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
@@ -299,6 +299,7 @@ class TranscriptPage(QWidget):
         layout.addWidget(card, 1)
 
         self._rows = None  # what's shown: [(caption key, its html)]
+        self._starts: "list[int]" = []  # where each shown caption starts in the document
         controller.board_changed.connect(self.render)
         controller.targets_changed.connect(lambda: self.render(force=True))
 
@@ -325,33 +326,47 @@ class TranscriptPage(QWidget):
             if is_translation and text:
                 lines.append(f'<span style="color:{theme.TEXT_FAINT}">{html.escape(LANGUAGE_NAMES.get(target, target))}'
                              f'</span>&nbsp;&nbsp;<span style="color:{theme.TEXT_DIM}">{html.escape(text)}</span>')
-        return f'<div style="line-height:140%">{"<br>".join(lines)}<br></div>'
+        return "<br>".join(lines) + "<br>"
 
     def render(self, force=False):
-        """Shows the finished captions. Live updates don't touch it, a new
-        caption is appended, and only a changed one (a join) rebuilds the
-        text - off-screen, keeping your place unless you're at the bottom,
-        so it never flashes or jumps under you."""
+        """Shows the finished captions. Live updates don't touch it; a new
+        caption is appended and a changed one (a join - nearly always the
+        latest) is swapped in place, from it to the end, so the rest of the
+        page never redraws. Your place is kept unless you're at the bottom."""
         if not self.isVisible():
             return
         rows = [(cap.key, self._row(cap)) for cap in self._matching()]
-        if rows == self._rows and not force:
+        old = [] if force or self._rows is None else self._rows
+        if rows == old and not force:
             return
+        first_change = next((i for i, (a, b) in enumerate(zip(rows, old)) if a != b), min(len(rows), len(old)))
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         position = bar.value()
         self.view.setUpdatesEnabled(False)
         try:
-            if self._rows and not force and rows[:len(self._rows)] == self._rows:
-                new = rows[len(self._rows):]  # just more at the end
-            else:
+            doc = self.view.document()
+            cursor = QTextCursor(doc)
+            if first_change == 0 or not self._starts:
                 self.view.clear()
-                new = rows
-            for _, row in new:
-                self.view.append(row)
+                self._starts = []
+                cursor = QTextCursor(doc)
+            elif first_change < len(self._starts):
+                # Everything from the first changed caption on goes; the rest stays.
+                cursor.setPosition(self._starts[first_change] - (1 if first_change else 0))
+                cursor.movePosition(QTextCursor.MoveOperation.End, QTextCursor.MoveMode.KeepAnchor)
+                cursor.removeSelectedText()
+                del self._starts[first_change:]
+            cursor.movePosition(QTextCursor.MoveOperation.End)
+            for index in range(len(self._starts), len(rows)):
+                if index:
+                    cursor.insertBlock()
+                self._starts.append(cursor.position())
+                cursor.insertHtml(rows[index][1])
             if not rows:
                 self.view.setHtml(f'<p style="color:{theme.TEXT_FAINT}">'
                                   f'{"No matches." if self.search.text().strip() else "Nothing yet - captions will collect here."}</p>')
+                self._starts = []
             self._rows = rows
             bar.setValue(bar.maximum() if at_bottom or force else position)
         finally:
