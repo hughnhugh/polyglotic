@@ -22,6 +22,7 @@ import argparse
 import difflib
 import re
 import time
+import unicodedata
 from collections import deque
 
 from opencc import OpenCC
@@ -124,7 +125,33 @@ def _spoken_languages(info, text):
     return list(dict.fromkeys(languages))
 
 
-ECHO_WINDOW_SEC = 8       # how far apart a "You" caption and someone else's can be and still be one echo
+_ENGLISH_WORD_RE = re.compile(r"[A-Za-z']{2,}")
+# Combining marks Vietnamese spelling can't do without - the five tones plus
+# the breve, circumflex and horn (ă â ê ô ơ ư) - and đ. English has none.
+_VIETNAMESE_MARKS = {"̀", "́", "̃", "̉", "̣", "̆", "̂", "̛"}
+
+
+def _looks_vietnamese(text):
+    return any(c in "đĐ" or any(m in _VIETNAMESE_MARKS for m in unicodedata.normalize("NFD", c)) for c in text)
+
+
+def _heard_language(forced, info, text):
+    """The language a segment was really in. With the conversation
+    language pinned the speech model labels every line with it, English
+    included - which then gets "translated" English to English (a free
+    paraphrase) and never into an overlay's second language. A pinned
+    line whose text plainly isn't in that language is English."""
+    if not forced or info.language != forced:
+        return info.language
+    english = len(_ENGLISH_WORD_RE.findall(text)) >= 2
+    if forced == "vi" and english and not _looks_vietnamese(text):
+        return "en"
+    if forced in CJK_LANGUAGES and english and not _CJK_RE.search(text):
+        return "en"
+    return forced
+
+
+ECHO_WINDOW_SEC = 8      # how far apart a "You" caption and someone else's can be and still be one echo
 ECHO_SIMILARITY = 0.6
 
 
@@ -221,6 +248,10 @@ def make_process_segment(targets, out_queue):
             print(f"[debug] dropped a transcription echoing the context words (speaker_hint={speaker_hint}): "
                   f"{native_text!r}")
             return
+
+        heard = _heard_language(options["language"], info, native_text)
+        if heard != info.language:
+            info.language, info.languages = heard, [heard]
 
         now = time.time()
         if source_tag == "mic":
