@@ -411,7 +411,10 @@ class LanguagesPage(QWidget):
         for code in order:
             item = QListWidgetItem(LANGUAGE_NAMES[code])
             item.setData(Qt.ItemDataRole.UserRole, code)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            # Not user-checkable: the click handler toggles it, wherever on
+            # the row - a checkable box would toggle too and undo it.
+            item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Unchecked)
             self.list.addItem(item)
         self.list.itemChanged.connect(self._on_item_changed)
         self.list.itemClicked.connect(self._on_item_clicked)
