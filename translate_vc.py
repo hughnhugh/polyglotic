@@ -19,8 +19,10 @@ per target.
 """
 
 import argparse
+import difflib
 import re
 import time
+from collections import deque
 
 from opencc import OpenCC
 
@@ -101,11 +103,72 @@ def _echoes_context(text, context):
     return len(hits) == 2 and covered >= 0.6 * len(lowered.replace(" ", "").replace(",", ""))
 
 
+_LATIN_WORD_RE = re.compile(r"[A-Za-z\u00c0-\u024f]{3,}")
+_CJK_RE = re.compile(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]")
+CJK_LANGUAGES = {"zh", "zh-hant", "yue", "ja"}
+
+
+def _spoken_languages(info, text):
+    """Every language heard in a segment, main one first: the speech
+    model's own report (Qwen3-ASR lists mixed speech, e.g. Chinese and
+    English), plus what the text's scripts give away - Latin words in a
+    Chinese line, Chinese characters in an English one - for models that
+    only name one."""
+    languages = list(getattr(info, "languages", None) or [info.language])
+    if info.language in CJK_LANGUAGES and _LATIN_WORD_RE.search(text) and not any(
+            lang not in CJK_LANGUAGES for lang in languages):
+        languages.append("en")
+    if info.language not in CJK_LANGUAGES and _CJK_RE.search(text) and not any(
+            lang in CJK_LANGUAGES for lang in languages):
+        languages.append("zh")
+    return list(dict.fromkeys(languages))
+
+
+ECHO_WINDOW_SEC = 8       # how far apart a "You" caption and someone else's can be and still be one echo
+ECHO_SIMILARITY = 0.6
+
+
+def _comparable(text):
+    return "".join(c.lower() for c in text if c.isalnum())
+
+
+def _same_words(a, b):
+    """True if two captions are (nearly) the same speech - the mic echoing
+    what Discord played."""
+    a, b = _comparable(a), _comparable(b)
+    # Short replies ("yeah", "好的") are said by everyone - only lines long
+    # enough to be distinctive count as an echo.
+    minimum = 4 if _CJK_RE.search(a + b) else 8
+    if len(a) < minimum or len(b) < minimum:
+        return False
+    shorter, longer = sorted((a, b), key=len)
+    return shorter in longer or difflib.SequenceMatcher(None, a, b).ratio() >= ECHO_SIMILARITY
+
+
 def make_process_segment(targets, out_queue):
     """process_segment for the pipeline: one transcription per speech
     segment, translated into every target in `targets` (the live list the
     UI edits) and put on `out_queue` as a single caption record for
     captions.CaptionBoard."""
+
+    # A backup to overlay_core.is_bleed, which catches mic echoes before
+    # transcription: recent captions, to drop a "You" caption repeating
+    # what someone else just said (or take it back when theirs arrives).
+    recent_others = deque()   # (time, text)
+    recent_mine = deque()     # (time, text, caption group)
+
+    def is_echo_of_others(text, now):
+        while recent_others and now - recent_others[0][0] > ECHO_WINDOW_SEC:
+            recent_others.popleft()
+        return any(_same_words(text, other) for _, other in recent_others)
+
+    def take_back_my_echoes(text, now):
+        while recent_mine and now - recent_mine[0][0] > ECHO_WINDOW_SEC:
+            recent_mine.popleft()
+        for entry in [e for e in recent_mine if _same_words(text, e[1])]:
+            recent_mine.remove(entry)
+            print(f"[debug] took back \"You\" caption {entry[1]!r} - it was someone else's speech in the mic")
+            out_queue.put({"group": entry[2], "final": True, "native": None})
 
     def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False,
                         absorb=(), speech_end=None, live_section=0):
@@ -159,19 +222,41 @@ def make_process_segment(targets, out_queue):
                   f"{native_text!r}")
             return
 
+        now = time.time()
+        if source_tag == "mic":
+            if is_echo_of_others(native_text, now):
+                print(f"[debug] dropped \"You\" caption {native_text!r} - someone else's speech in the mic")
+                if caption_group and final:
+                    out_queue.put({"group": caption_group, "final": True, "native": None})
+                return
+            if final and caption_group:
+                recent_mine.append((now, native_text, caption_group))
+        else:
+            recent_others.append((now, native_text))
+            take_back_my_echoes(native_text, now)
+
         if info.language == "zh":
             native_text = _t2s.convert(native_text)  # normalize display text to Simplified
         elif info.language == "yue":
             native_text = _cantonese_script(native_text)  # Cantonese reads in Traditional
 
+        spoken = _spoken_languages(info, native_text)
+        mixed = len(spoken) > 1
         translations = {}  # target -> (text to show, is it a translation)
         for target_lang in list(targets):
-            if info.language == "zh" and target_lang in CHINESE_TARGETS:
+            if caption_group and not final and not live_options["translate"]:
+                translations[target_lang] = (native_text, False)
+            elif info.language == "zh" and target_lang in CHINESE_TARGETS and not mixed:
                 # Mandarin into Chinese: only the script, if anything, changes
                 translations[target_lang] = (CHINESE_TARGETS[target_lang].convert(native_text), False)
-            elif info.language == target_lang or (caption_group and not final and not live_options["translate"]):
+            elif info.language == target_lang and not mixed:
                 translations[target_lang] = (native_text, False)
             else:
+                # A line mixing languages is translated even into its main
+                # one - the whole line rewritten in the target language, so
+                # the parts already in it stay and the rest ("我觉得这个
+                # culture concept 很 specific") is translated in context,
+                # rather than left as it was.
                 # Every target, English included, goes through the
                 # translator - it replaced Whisper's own X->English
                 # translate task too, which occasionally invented content
@@ -197,6 +282,7 @@ def make_process_segment(targets, out_queue):
             "speaker": "You" if source_tag == "mic" else (speaker_hint[1] if speaker_hint else ""),
             "you": source_tag == "mic",
             "lang": info.language,
+            "langs": spoken,
             "native": native_text,
             "translations": translations,
             "group": caption_group,

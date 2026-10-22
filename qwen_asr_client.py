@@ -122,11 +122,15 @@ class QwenASRModel:
             result = json.load(r)
 
         # Mixed-language speech is reported as e.g. "Chinese,English" - the
-        # first is the one the app treats as the source. An empty language
-        # is Qwen's own "silent / no speech" signal.
-        name = result["language"].split(",")[0].strip()
+        # first is the one the app treats as the source; all of them go in
+        # info.languages, so a line mixing in a window's own language still
+        # gets translated. An empty language is Qwen's own "silent / no
+        # speech" signal.
+        names = [n.strip() for n in result["language"].split(",") if n.strip()]
+        name = names[0] if names else ""
         code = LANGUAGE_CODES.get(name.lower(), name.lower())
-        info = SimpleNamespace(language=code or "unknown", language_probability=1.0)
+        languages = list(dict.fromkeys(LANGUAGE_CODES.get(n.lower(), n.lower()) for n in names))
+        info = SimpleNamespace(language=code or "unknown", language_probability=1.0, languages=languages)
         text = result["text"].strip()
         if not text or not name:
             return [], info

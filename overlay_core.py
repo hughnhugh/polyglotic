@@ -508,6 +508,70 @@ def _capture_loop(stop_event, audio_q, native_rate, channels, vad_model, model_h
         broadcast(f"[ERROR] {label} capture stopped: {type(e).__name__}: {e}")
 
 
+# The loopback thread's recent audio (what the PC is playing), for the mic
+# thread's bleed check - set once loopback capture starts.
+_loopback_buffer: "deque | None" = None
+# Mic speech whose loudness follows what the PC was playing this closely is
+# bleed - Discord leaking from headphones into the mic, picked up when your
+# own small noise opened a mic segment - not you talking.
+BLEED_CORRELATION = 0.6
+BLEED_MAX_LAG_SEC = 0.5     # how far the mic can trail the PC's output (device latency, timestamps)
+_ENVELOPE_FRAME = 320       # 20ms at 16kHz
+
+
+def _envelope(audio):
+    """Loudness over time, 20ms frames, in log terms - comparable between
+    a loud original and a quiet copy of it."""
+    n = len(audio) // _ENVELOPE_FRAME
+    frames = audio[:n * _ENVELOPE_FRAME].reshape(n, _ENVELOPE_FRAME)
+    return np.log(np.sqrt((frames ** 2).mean(axis=1)) + 1e-4)
+
+
+def _median5(values):
+    if len(values) < 5:
+        return values
+    padded = np.pad(values, 2, mode="edge")
+    return np.median(np.lib.stride_tricks.sliding_window_view(padded, 5), axis=1)
+
+
+def _snapshot(buffer):
+    """A list copy of a deque another thread appends to."""
+    for _ in range(5):
+        try:
+            return list(buffer)
+        except RuntimeError:  # mutated mid-copy - try again
+            continue
+    return []
+
+
+def is_bleed(mic_buffer, start, end, loopback_buffer=None):
+    """True if the mic audio from start to end is mostly the PC's own audio
+    picked up again - its loudness moving with what loopback was playing
+    (allowing for the mic trailing it), which your own voice doesn't. Your
+    voice over someone else's still counts as you: it dominates the mic's
+    loudness, so the two don't move together."""
+    loopback = loopback_buffer if loopback_buffer is not None else _loopback_buffer
+    if loopback is None or end - start < 0.4:
+        return False
+    mic = _slice_timestamped_buffer(_snapshot(mic_buffer), start, end)
+    played = _slice_timestamped_buffer(_snapshot(loopback), start - BLEED_MAX_LAG_SEC, end)
+    if mic is None or played is None:
+        return False
+    # A running median over 100ms takes out clicks, taps and bumps on the
+    # mic - the "light noise" that opened the segment - while syllables of
+    # real speech, a few times longer, come through.
+    m, p = _median5(_envelope(mic)), _envelope(played)
+    if len(m) < 10 or len(p) < len(m) or p.max() < np.log(0.005):
+        return False  # too short to tell, or nothing much was playing
+    best = -1.0
+    for offset in range(0, len(p) - len(m) + 1):  # each lag of the mic behind the PC's output
+        window = p[offset:offset + len(m)]
+        if window.std() < 1e-6 or m.std() < 1e-6:
+            continue
+        best = max(best, float(np.corrcoef(m, window)[0, 1]))
+    return best >= BLEED_CORRELATION
+
+
 def _slice_timestamped_buffer(buffer, start_ts, end_ts):
     """buffer: deque of (chunk_start_ts, pcm_16k) - concatenate whichever
     chunks overlap [start_ts, end_ts] (padded for clock skew). Only
@@ -682,6 +746,9 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
     # slices its intervals out of loopback's, and VAD-cut speech is sliced
     # from it for every live update and final caption.
     timestamped_buffer: "deque" = deque()
+    if is_loopback:
+        global _loopback_buffer
+        _loopback_buffer = timestamped_buffer
     bridge_was_connected = False  # only meaningful when is_loopback
     last_bridge_status_text = None
     # The current VAD utterance: where its caption's audio starts, how many
@@ -778,7 +845,14 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
                 # once more, replacing its live caption. Same treatment as
                 # a closed Discord interval.
                 speech_end = frame_end - silence_frames * frame_sec
-                if emit and (utt_group is not None or utt_speech_frames >= min_speech_frames):
+                bleed = source_tag == "mic" and emit and is_bleed(timestamped_buffer, utt_start, speech_end)
+                if bleed:
+                    print(f"[debug] mic speech {speech_end - utt_start:.1f}s dropped - it's the PC's audio "
+                          "leaking into the mic")
+                    if utt_group is not None:  # take back its live caption
+                        executor.submit(process_segment_fn, model_holder.get(), None, source_tag,
+                                        caption_group=utt_group, final=True)
+                elif emit and (utt_group is not None or utt_speech_frames >= min_speech_frames):
                     start, group, absorb = _plan_final(run_key, utt_start, speech_end, utt_group)
                     segment = _slice_timestamped_buffer(timestamped_buffer, start, speech_end)
                     if segment is not None:
@@ -792,7 +866,7 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
             elif frame_end - utt_start >= BRIDGE_FINAL_MAX_SEC:
                 # Talking past what one caption takes - finalize what's
                 # there and carry on in a new caption.
-                if emit:
+                if emit and not (source_tag == "mic" and is_bleed(timestamped_buffer, utt_start, frame_end)):
                     group = utt_group or _new_caption_group()
                     segment = _slice_timestamped_buffer(timestamped_buffer, utt_start, frame_end)
                     if segment is not None:
@@ -809,6 +883,8 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
                     utt_section += 1
                     utt_section_start = utt_last_update
                 utt_last_update = frame_end
+                if source_tag == "mic" and is_bleed(timestamped_buffer, utt_section_start, frame_end):
+                    continue  # the PC's audio in the mic - no live caption for it
                 utt_group = utt_group or _new_caption_group()
                 segment = _slice_timestamped_buffer(timestamped_buffer, utt_section_start, frame_end)
                 if segment is not None:

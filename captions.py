@@ -35,13 +35,14 @@ class Caption:
     key: int                  # unique, stable across updates - views use it to reuse widgets
     speaker: str              # "" when unknown (no Discord bridge)
     is_you: bool              # your own mic
-    lang: str                 # the speech's language code
+    lang: str                 # the speech's (main) language code
     native: str               # what was said, in its own language
     translations: dict        # target -> (text, is_translation): text to show in that target's view
     group: "str | None"
     live: bool                # still being spoken - a live update, replaced later
     delay: "float | None"     # seconds from the end of the speech to this version appearing
     proc: "float | None"      # transcription + translation time alone
+    langs: tuple = ()         # every language heard in it, main first - more than one when mixed
     updated_at: float = field(default_factory=time.time)
     time: datetime = field(default_factory=datetime.now)
 
@@ -135,7 +136,7 @@ class CaptionBoard:
         return Caption(
             key=next(self._keys), speaker=record.get("speaker", ""), is_you=record.get("you", False),
             lang=record.get("lang", ""), native=record["native"], translations=dict(record.get("translations", {})),
-            group=record.get("group"), live=live,
+            group=record.get("group"), live=live, langs=tuple(record.get("langs") or ()),
             delay=(time.time() - speech_end) if speech_end is not None else None, proc=record.get("proc"),
         )
 

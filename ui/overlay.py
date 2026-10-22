@@ -165,6 +165,11 @@ def spoken_language_name(code):
     return _SPOKEN_NAMES.get(code) or LANGUAGE_NAMES.get(code) or code.upper()
 
 
+def spoken_languages_label(caption):
+    """"Mandarin", or "Mandarin + English" for a line mixing languages."""
+    return " + ".join(spoken_language_name(code) for code in (caption.langs or (caption.lang,)))
+
+
 class CaptionBlock(QWidget):
     """One caption: speaker, translation, original."""
 
@@ -202,7 +207,7 @@ class CaptionBlock(QWidget):
                              theme.speaker_color(caption.speaker, caption.is_you), 1.6 * scale)
         self.language.setVisible(show_language)
         if show_language:
-            self.language.set(spoken_language_name(caption.lang), _caption_font(BASE_SPEAKER_PX * scale,
+            self.language.set(spoken_languages_label(caption), _caption_font(BASE_SPEAKER_PX * scale,
                                                                                 QFont.Weight.Normal),
                               "#aab2c0", 1.6 * scale)
 
@@ -318,7 +323,7 @@ class CaptionCanvas(QWidget):
             item = self.items.get(caption.key)
             if item is None:
                 item = self.items[caption.key] = _Item(caption.key)
-            signature = (caption.speaker, caption.lang, caption.live, caption.text_for(target), width,
+            signature = (caption.speaker, caption.lang, caption.langs, caption.live, caption.text_for(target), width,
                          tuple(sorted(prefs.items())))
             if signature != item.signature:
                 primary = caption.text_for(target)[0]
@@ -347,7 +352,7 @@ class CaptionCanvas(QWidget):
                 x += QFontMetricsF(font).horizontalAdvance(caption.speaker) + 8 * scale
             if show_language:
                 lang_font = _caption_font(BASE_SPEAKER_PX * scale, QFont.Weight.Normal)
-                path, h = _text_paths(spoken_language_name(caption.lang), lang_font, width, x, y)
+                path, h = _text_paths(spoken_languages_label(caption), lang_font, width, x, y)
                 parts.append((path, QColor("#aab2c0"), 1.6 * scale))
             y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
         color = QColor("white")

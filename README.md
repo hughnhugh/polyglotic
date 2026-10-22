@@ -156,6 +156,23 @@ game to borderless.
 - **Models** - the speech model (switching takes a few seconds, during
   which captions pause) and the translator's status.
 
+### Mixed languages and your own mic
+
+A line mixing languages ("反正就是一个非常specific的这种culture concept")
+is tagged with both ("Mandarin + English") and translated even into its
+main language's overlay - the whole line rewritten in that language, so
+the English bits come out in Chinese too ("反正这就是个非常具体的文化概念啦"),
+translated in context rather than piece by piece.
+
+Your mic only captions you. With headphones, Discord can leak faintly into
+the mic, and a small noise of yours (a click, a tap, a breath) can open a
+mic segment that then picks up whoever's talking. Before transcribing, the
+app checks whether the mic's loudness follows what the PC was playing - a
+leaked copy does, your voice doesn't (even talking over someone) - and
+drops leaks. As a backup, a "You" caption repeating what someone else said
+in the last few seconds is dropped, or taken back if theirs arrives after
+it.
+
 ### How captions update
 
 While someone's talking, their caption appears live and grows as they go -
