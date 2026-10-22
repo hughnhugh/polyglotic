@@ -137,11 +137,11 @@ class OutlinedText(QWidget):
         p.fillPath(path, self._color)
 
 
-# Chinese/Japanese characters pack far more strokes into each glyph, so
-# at the same pixel size they read as smaller and denser than Latin text -
-# subtitles in those scripts are set larger. Text that's mostly CJK gets
-# this much more size, in the font drawn for its script.
-CJK_SCALE = 1.18
+# Chinese/Japanese next to Latin text at the same pixel size: in its own
+# script's font (YaHei, JhengHei, Yu Gothic - below) it already reads about
+# as large; a touch more keeps its denser strokes as easy to read without
+# it towering over the English line beside it.
+CJK_SCALE = 1.05
 CJK_FAMILIES = {
     "simplified": ["Microsoft YaHei UI", "Microsoft YaHei"],
     "traditional": ["Microsoft JhengHei UI", "Microsoft JhengHei"],
