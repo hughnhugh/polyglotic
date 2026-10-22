@@ -26,7 +26,7 @@ from overlay_core import live_options, speech_context, speech_options
 from qwen_asr_client import MODEL_DIRS, PYTHON as QWEN_PYTHON
 from ui import theme
 from ui.app import gpu_memory
-from ui.overlay import CaptionBlock
+from ui.overlay import CaptionBlock, spoken_language_name
 from ui.widgets import (Card, Chip, FlowRow, Segmented, SettingRow, StatusDot, ToggleSwitch, app_icon, button, glyph,
                         label)
 
@@ -328,7 +328,7 @@ class TranscriptPage(QWidget):
             color = theme.speaker_color(cap.speaker, cap.is_you) if cap.speaker else theme.TEXT_DIM
             lines = [f'<span style="color:{theme.TEXT_FAINT}">{cap.time:%H:%M:%S}</span>&nbsp;&nbsp;'
                      f'<b style="color:{color}">{speaker}</b>&nbsp;&nbsp;'
-                     f'<span style="color:{theme.TEXT_FAINT}">{html.escape(cap.lang)}</span>',
+                     f'<span style="color:{theme.TEXT_FAINT}">{html.escape(spoken_language_name(cap.lang))}</span>',
                      f'<span style="color:{theme.TEXT}">{html.escape(cap.native)}</span>']
             for target in self.c.targets:
                 text, is_translation = cap.translations.get(target, ("", False))
@@ -538,10 +538,14 @@ class CaptionsPage(QWidget):
         look.add(SettingRow("Background", "How solid the panel behind the text is.",
                             self._slider(0, 100, int(prefs["opacity"] * 100), "%",
                                          lambda v: controller.set_pref("opacity", v / 100))))
+        language = ToggleSwitch(prefs["show_language"])
+        language.toggled.connect(lambda on: controller.set_pref("show_language", on))
         speakers = ToggleSwitch(prefs["show_speakers"])
         speakers.toggled.connect(lambda on: controller.set_pref("show_speakers", on))
         look.add(SettingRow("Speaker names", "From the Discord plugin; your own speech shows as “You”.",
                             speakers))
+        look.add(SettingRow("Spoken language", "Which language each caption was spoken in, beside the name.",
+                            language))
         self.original = ToggleSwitch(prefs["show_original"])
         self.original.toggled.connect(lambda on: controller.set_pref("show_original", on))
         look.add(SettingRow("Original under the translation", None, self.original))

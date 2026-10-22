@@ -17,7 +17,7 @@ import math
 import time
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QTextLayout, QTextOption
+from PySide6.QtGui import QColor, QFont, QFontMetricsF, QPainter, QPainterPath, QPen, QTextLayout, QTextOption
 from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QSizeGrip, QSizePolicy,
                                QVBoxLayout, QWidget)
 
@@ -39,15 +39,20 @@ class OutlinedText(QWidget):
     subtitles - readable over any scene, even with no panel behind it.
     QLabel can't stroke text, so this lays it out and draws it itself."""
 
-    def __init__(self):
+    def __init__(self, wrap=True):
+        """wrap=False: one line, as wide as its text (a label beside another)."""
         super().__init__()
         self._text = ""
         self._font = QFont()
         self._color = QColor("white")
         self._outline = 3.0
+        self._wrap = wrap
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
-        policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
-        policy.setHeightForWidth(True)
+        if wrap:
+            policy = QSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+            policy.setHeightForWidth(True)
+        else:
+            policy = QSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self.setSizePolicy(policy)
 
     def set(self, text, font, color, outline):
@@ -79,16 +84,22 @@ class OutlinedText(QWidget):
         return lines, math.ceil(y) + pad
 
     def hasHeightForWidth(self):  # noqa: N802
-        return True
+        return self._wrap
 
     def heightForWidth(self, width):  # noqa: N802
         return self._lines(width)[1]
 
     def sizeHint(self):  # noqa: N802
+        if not self._wrap:
+            pad = math.ceil(self._outline)
+            width = math.ceil(QFontMetricsF(self._font).horizontalAdvance(self._text)) + 2 * pad + 2
+            return QSize(width, self._lines(width)[1])
         width = self.width() if self.width() > 50 else 400
         return QSize(width, self.heightForWidth(width))
 
     def minimumSizeHint(self):  # noqa: N802
+        if not self._wrap:
+            return self.sizeHint()
         return QSize(50, self.heightForWidth(max(self.width(), 50)))
 
     def paintEvent(self, event):  # noqa: N802
@@ -144,6 +155,16 @@ def _caption_font(px, weight, text="", lang=None):
     return font
 
 
+# What was spoken, as the tag beside the speaker: Chinese speech is
+# "Mandarin" (its target name, "Chinese (Simplified)", describes a script).
+_SPOKEN_NAMES = {"zh": "Mandarin", "yue": "Cantonese"}
+
+
+def spoken_language_name(code):
+    from lang_codes import LANGUAGE_NAMES
+    return _SPOKEN_NAMES.get(code) or LANGUAGE_NAMES.get(code) or code.upper()
+
+
 class CaptionBlock(QWidget):
     """One caption: speaker, translation, original."""
 
@@ -152,10 +173,19 @@ class CaptionBlock(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        self.speaker = OutlinedText()
+        # Who said it, and in what language - "marina  Mandarin"
+        self.head = QWidget()
+        head = QHBoxLayout(self.head)
+        head.setContentsMargins(0, 0, 0, 0)
+        head.setSpacing(6)
+        self.speaker = OutlinedText(wrap=False)
+        self.language = OutlinedText(wrap=False)
+        head.addWidget(self.speaker)
+        head.addWidget(self.language)
+        head.addStretch(1)
         self.primary = OutlinedText()
         self.secondary = OutlinedText()
-        for part in (self.speaker, self.primary, self.secondary):
+        for part in (self.head, self.primary, self.secondary):
             layout.addWidget(part)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
@@ -164,10 +194,17 @@ class CaptionBlock(QWidget):
         primary, original = caption.text_for(target)
 
         show_speaker = prefs["show_speakers"] and bool(caption.speaker)
+        show_language = prefs["show_language"] and bool(caption.lang)
+        self.head.setVisible(show_speaker or show_language)
         self.speaker.setVisible(show_speaker)
         if show_speaker:
             self.speaker.set(caption.speaker, _caption_font(BASE_SPEAKER_PX * scale, QFont.Weight.DemiBold),
                              theme.speaker_color(caption.speaker, caption.is_you), 1.6 * scale)
+        self.language.setVisible(show_language)
+        if show_language:
+            self.language.set(spoken_language_name(caption.lang), _caption_font(BASE_SPEAKER_PX * scale,
+                                                                                QFont.Weight.Normal),
+                              "#aab2c0", 1.6 * scale)
 
         # A live caption is still being spoken - slightly softer, and it
         # trails off, until the final version replaces it.
