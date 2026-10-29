@@ -1,4 +1,4 @@
-# vc-translator
+# Polyglotic
 
 Live subtitles and translation for anything your PC plays - videos,
 streams, games, lectures. Captures your PC's audio output via WASAPI
@@ -16,7 +16,7 @@ window holds the settings and a searchable transcript of the session,
 kept on screen only unless you choose to save it.
 
 > Looking for the Discord voice-chat version, with speaker names from a
-> Vencord plugin? It lives on the [`discord`](https://github.com/hughnhugh/vc-translator/tree/discord) branch.
+> Vencord plugin? It lives on the [`discord`](https://github.com/hughnhugh/polyglotic/tree/discord) branch.
 
 ## Requirements
 

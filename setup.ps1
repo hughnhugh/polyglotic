@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 <#
-    One-time setup for vc-translator: locates a usable Python install, creates
+    One-time setup for Polyglotic: locates a usable Python install, creates
     the project's venv (venv/) if it doesn't already exist, and installs every
     dependency. Safe to re-run - an existing venv is reused, not recreated, so
     re-running this after a `git pull` just catches up on any new packages.
@@ -53,7 +53,7 @@ if (-not $pythonExe) {
         $pyVersion = & python --version 2>&1
         if ($LASTEXITCODE -eq 0) {
             if ($pyVersion -notmatch "3\.12") {
-                Write-Warn "Found $pyVersion, not 3.12 - vc-translator is tested on 3.12. Continuing anyway; if package installs fail below, install Python 3.12 from https://www.python.org/downloads/ and re-run this script."
+                Write-Warn "Found $pyVersion, not 3.12 - Polyglotic is tested on 3.12. Continuing anyway; if package installs fail below, install Python 3.12 from https://www.python.org/downloads/ and re-run this script."
             } else {
                 Write-Host "Found: $pyVersion"
             }
@@ -74,10 +74,10 @@ try {
     if ($LASTEXITCODE -eq 0) {
         Write-Host "NVIDIA GPU detected."
     } else {
-        Write-Warn "'nvidia-smi' ran but returned an error - vc-translator requires an NVIDIA GPU with CUDA support. It will not run without one."
+        Write-Warn "'nvidia-smi' ran but returned an error - Polyglotic requires an NVIDIA GPU with CUDA support. It will not run without one."
     }
 } catch {
-    Write-Warn "'nvidia-smi' not found - vc-translator requires an NVIDIA GPU with CUDA support (and its driver installed). It will not run without one."
+    Write-Warn "'nvidia-smi' not found - Polyglotic requires an NVIDIA GPU with CUDA support (and its driver installed). It will not run without one."
 }
 
 # --- Create the venv (if it doesn't already exist) ----------------------
@@ -208,7 +208,7 @@ if ($QwenASR) {
 }
 
 Write-Step "Setup complete"
-Write-Host "Run vc-translator with:"
+Write-Host "Run Polyglotic with:"
 Write-Host "  .\venv\Scripts\python.exe translate_vc.py"
 Write-Host ""
 if ($QwenASR) {

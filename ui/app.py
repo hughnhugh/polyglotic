@@ -340,9 +340,9 @@ class _Hotkeys(QAbstractNativeEventFilter):
 
 def _tray(controller, show_main):
     tray = QSystemTrayIcon(app_icon())
-    tray.setToolTip("vc-translator")
+    tray.setToolTip("Polyglotic")
     menu = QMenu()
-    open_action = menu.addAction("Open vc-translator", show_main)
+    open_action = menu.addAction("Open Polyglotic", show_main)
     menu.setDefaultAction(open_action)
     menu.addSeparator()
     toggles = [
@@ -365,7 +365,7 @@ def _tray(controller, show_main):
             blocked = action.blockSignals(True)
             action.setChecked(getter())
             action.blockSignals(blocked)
-        tray.setToolTip("vc-translator - paused" if controller.paused else "vc-translator - listening")
+        tray.setToolTip("Polyglotic - paused" if controller.paused else "Polyglotic - listening")
 
     controller.state_changed.connect(sync)
     sync()
@@ -383,10 +383,10 @@ def run(make_process_segment, targets, model_size, capture_mic):
     except Exception:
         pass
     # Its own taskbar identity, so Windows shows the app's icon rather than Python's.
-    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("vc-translator")
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("polyglotic")
 
     app = QApplication(sys.argv)
-    app.setApplicationName("vc-translator")
+    app.setApplicationName("Polyglotic")
     app.setQuitOnLastWindowClosed(False)  # closing the main window keeps it running in the tray
     app.setWindowIcon(app_icon())
     app.setFont(theme.ui_font())

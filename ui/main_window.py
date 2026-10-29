@@ -872,7 +872,7 @@ class MainWindow(QMainWindow):
         self.c = controller
         self.tray = None
         self._told_about_tray = False
-        self.setWindowTitle("vc-translator")
+        self.setWindowTitle("Polyglotic")
         self.setWindowIcon(app_icon())
         self.resize(980, 720)
         self.setMinimumSize(820, 560)
@@ -894,7 +894,7 @@ class MainWindow(QMainWindow):
         logo = QLabel()
         logo.setPixmap(app_icon().pixmap(28, 28))
         brand.addWidget(logo)
-        name = label("vc-translator")
+        name = label("Polyglotic")
         name.setStyleSheet("font-size: 15px; font-weight: 600;")
         brand.addWidget(name)
         brand.addStretch(1)
@@ -938,7 +938,7 @@ class MainWindow(QMainWindow):
         side.addSpacing(8)
         quit_btn = button("Quit", None, QApplication.quit)
         quit_btn.setObjectName("QuitButton")
-        quit_btn.setToolTip("Stop captioning and close vc-translator - closing this window keeps it running in the tray")
+        quit_btn.setToolTip("Stop captioning and close Polyglotic - closing this window keeps it running in the tray")
         side.addWidget(quit_btn)
 
         layout.addWidget(sidebar)
@@ -973,6 +973,6 @@ class MainWindow(QMainWindow):
         self.hide()
         if not self._told_about_tray:
             self._told_about_tray = True
-            self.tray.showMessage("vc-translator is still running",
+            self.tray.showMessage("Polyglotic is still running",
                                   "Captions keep going. Open it again or quit from the tray icon.",
                                   app_icon(), 4000)
