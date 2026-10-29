@@ -1,9 +1,9 @@
 """Verifies the app keeps your speech apart from the PC's audio leaking
-into your mic (Discord through headphones): overlay_core.is_bleed on the
+into your mic (through headphones or speakers): overlay_core.is_bleed on the
 audio - including with your own clicks and taps on the mic, and talking
 over someone - using synthetic speech-like audio (bursts of
 syllable-length noise); and the text backup in process_segment, which
-drops or takes back a "You" caption repeating someone else's. Also mixed-
+drops or takes back a "You" caption repeating the PC's audio. Also mixed-
 language lines being translated into their own main language. No GPU."""
 
 import queue
@@ -87,27 +87,27 @@ def main():
             out.append(q.get())
         return out
 
-    process(model("So where's China's chip industry at right now?", "en"), "AUDIO", "", ("1", "marina"),
+    process(model("So where's China's chip industry at right now?", "en"), "AUDIO", "",
             caption_group="d1", final=True)
-    process(model("where's China's chip industry at", "en"), "AUDIO", "mic", None, caption_group="m1", final=True)
+    process(model("where's China's chip industry at", "en"), "AUDIO", "mic", caption_group="m1", final=True)
     out = drain()
-    assert [r.get("speaker") for r in out if r.get("native")] == ["marina"] and out[-1]["native"] is None, out
-    print("OK: a \"You\" caption repeating marina's line is dropped")
+    assert [r.get("you") for r in out if r.get("native")] == [False] and out[-1]["native"] is None, out
+    print("OK: a \"You\" caption repeating the PC's line is dropped")
 
-    process(model("we should go eat hot pot tonight", "en"), "AUDIO", "mic", None, caption_group="m2", final=True)
-    process(model("We should go eat hot pot tonight!", "en"), "AUDIO", "", ("2", "Caleb"), caption_group="d2", final=True)
+    process(model("we should go eat hot pot tonight", "en"), "AUDIO", "mic", caption_group="m2", final=True)
+    process(model("We should go eat hot pot tonight!", "en"), "AUDIO", "", caption_group="d2", final=True)
     out = drain()
     assert any(r.get("group") == "m2" and r.get("native") is None for r in out), out
-    print("OK: a \"You\" caption is taken back when Caleb's caption turns out to be the same speech")
+    print("OK: a \"You\" caption is taken back when the PC's caption turns out to be the same speech")
 
-    process(model("I'm hungry, what are we doing", "en"), "AUDIO", "mic", None, caption_group="m3", final=True)
+    process(model("I'm hungry, what are we doing", "en"), "AUDIO", "mic", caption_group="m3", final=True)
     assert [r["speaker"] for r in drain()] == ["You"]
     print("OK: your own speech is kept")
 
-    process(model("反正就是一个非常specific的这种culture concept嘛", "zh"), "AUDIO", "", ("3", "kaektus"))
+    process(model("反正就是一个非常specific的这种culture concept嘛", "zh"), "AUDIO", "")
     record = drain()[0]
     assert record["langs"] == ["zh", "en"] and record["translations"]["zh"][1] is True, record
-    process(model("我觉得这个地方很好", "zh"), "AUDIO", "", ("3", "kaektus"))
+    process(model("我觉得这个地方很好", "zh"), "AUDIO", "")
     record = drain()[0]
     assert record["langs"] == ["zh"] and record["translations"]["zh"] == ("我觉得这个地方很好", False), record
     print("OK: a mixed Chinese/English line is translated into Chinese too; a plain one isn't")

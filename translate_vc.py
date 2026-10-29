@@ -1,9 +1,8 @@
 """
-Live translator for Discord (or any system audio).
+Live subtitles and translation for anything your PC plays.
 Captures whatever your PC is currently playing (WASAPI loopback) plus your
-mic, cuts it into speech segments (Silero VAD, or Discord's own speaking
-events through the bridge plugin), transcribes them (Qwen3-ASR or Whisper)
-and translates each into every chosen target language with Hy-MT2, a local
+mic, cuts it into speech segments (Silero VAD), transcribes them (Qwen3-ASR
+or Whisper) and translates each into every chosen target language with Hy-MT2, a local
 translation LLM (see translator.py).
 
 Captions appear in a subtitle overlay per target language, the main
@@ -27,7 +26,6 @@ from collections import deque
 
 from opencc import OpenCC
 
-import discord_bridge
 import settings
 import translator
 from lang_codes import TARGET_LANGUAGES
@@ -91,8 +89,8 @@ def _is_degenerate(text):
 
 def _echoes_context(text, context):
     """True if a transcription is just the context words read back - the
-    speech model echoing its prompt for a short or unclear clip ("Caleb,
-    CrèmeBrûlée, JuGGerNauT, kaektus, marina, ..." as someone's caption)
+    speech model echoing its prompt for a short or unclear clip ("Alex,
+    HSK, Valorant, bún bò Huế, ..." as a caption)
     rather than what was said: three or more of the context's entries in
     it, or two making up most of it. Someone saying a single name still
     gets through."""
@@ -151,7 +149,7 @@ def _heard_language(forced, info, text):
     return forced
 
 
-ECHO_WINDOW_SEC = 8      # how far apart a "You" caption and someone else's can be and still be one echo
+ECHO_WINDOW_SEC = 8      # how far apart a "You" caption and a system audio one can be and still be one echo
 ECHO_SIMILARITY = 0.6
 
 
@@ -161,7 +159,7 @@ def _comparable(text):
 
 def _same_words(a, b):
     """True if two captions are (nearly) the same speech - the mic echoing
-    what Discord played."""
+    what the PC played."""
     a, b = _comparable(a), _comparable(b)
     # Short replies ("yeah", "好的") are said by everyone - only lines long
     # enough to be distinctive count as an echo.
@@ -180,7 +178,7 @@ def make_process_segment(targets, out_queue):
 
     # A backup to overlay_core.is_bleed, which catches mic echoes before
     # transcription: recent captions, to drop a "You" caption repeating
-    # what someone else just said (or take it back when theirs arrives).
+    # what the PC just played (or take it back when that caption arrives).
     recent_others = deque()   # (time, text)
     recent_mine = deque()     # (time, text, caption group)
 
@@ -194,16 +192,16 @@ def make_process_segment(targets, out_queue):
             recent_mine.popleft()
         for entry in [e for e in recent_mine if _same_words(text, e[1])]:
             recent_mine.remove(entry)
-            print(f"[debug] took back \"You\" caption {entry[1]!r} - it was someone else's speech in the mic")
+            print(f"[debug] took back \"You\" caption {entry[1]!r} - it was the PC's audio in the mic")
             out_queue.put({"group": entry[2], "final": True, "native": None})
 
-    def process_segment(model, segment, source_tag="", speaker_hint=None, caption_group=None, final=False,
+    def process_segment(model, segment, source_tag="", caption_group=None, final=False,
                         absorb=(), speech_end=None, live_section=0):
         """caption_group/final: a caption's live updates (final=False) share
         a group, and its final caption (final=True) replaces them - see
         overlay_core.LIVE_MIN_AUDIO_SEC. A final also replaces the captions
-        of the groups in absorb - a speaker's back-to-back speech joined
-        into one caption (see overlay_core.BRIDGE_JOIN_GAP_SEC). segment
+        of the groups in absorb - a source's back-to-back speech joined
+        into one caption (see overlay_core.JOIN_GAP_SEC). segment
         None with a group just removes that group's live caption. If the
         final pass yields nothing usable the earlier captions stay.
         speech_end: when the speech ended, for the end-to-end delay readout.
@@ -229,12 +227,12 @@ def make_process_segment(targets, out_queue):
 
         if not is_reliable_transcription(native_segments, info):
             if source_tag != "mic":
-                # Console-only - loopback speech getting cut by VAD/the
-                # Discord bridge but then discarded here would otherwise be
-                # invisible, since this is a silent return.
+                # Console-only - loopback speech cut by VAD but then
+                # discarded here would otherwise be invisible, since this
+                # is a silent return.
                 avg_no_speech = sum(s.no_speech_prob for s in native_segments) / len(native_segments) if native_segments else None
                 avg_logprob = sum(s.avg_logprob for s in native_segments) / len(native_segments) if native_segments else None
-                print(f"[debug] dropped unreliable segment (source={source_tag!r} speaker_hint={speaker_hint}): "
+                print(f"[debug] dropped unreliable segment (source={source_tag!r}): "
                       f"lang={info.language} lang_prob={info.language_probability:.2f} "
                       f"avg_no_speech={avg_no_speech} avg_logprob={avg_logprob}")
             return
@@ -242,10 +240,10 @@ def make_process_segment(targets, out_queue):
         native_text = "".join(s.text for s in native_segments).strip()
         if not native_text:
             if source_tag != "mic":
-                print(f"[debug] transcription came back empty (source={source_tag!r} speaker_hint={speaker_hint})")
+                print(f"[debug] transcription came back empty (source={source_tag!r})")
             return
         if options["initial_prompt"] and _echoes_context(native_text, options["initial_prompt"]):
-            print(f"[debug] dropped a transcription echoing the context words (speaker_hint={speaker_hint}): "
+            print(f"[debug] dropped a transcription echoing the context words (source={source_tag!r}): "
                   f"{native_text!r}")
             return
 
@@ -256,7 +254,7 @@ def make_process_segment(targets, out_queue):
         now = time.time()
         if source_tag == "mic":
             if is_echo_of_others(native_text, now):
-                print(f"[debug] dropped \"You\" caption {native_text!r} - someone else's speech in the mic")
+                print(f"[debug] dropped \"You\" caption {native_text!r} - the PC's audio in the mic")
                 if caption_group and final:
                     out_queue.put({"group": caption_group, "final": True, "native": None})
                 return
@@ -307,10 +305,9 @@ def make_process_segment(targets, out_queue):
                 translations[target_lang] = (translated, True) if translated else (native_text, False)
 
         out_queue.put({
-            # Ground truth from the Discord speaking bridge - the only source
-            # of speaker labels this app has; without it, captions are
-            # unlabeled rather than guessed.
-            "speaker": "You" if source_tag == "mic" else (speaker_hint[1] if speaker_hint else ""),
+            # Your mic is "You"; system audio is unlabeled rather than
+            # guessed.
+            "speaker": "You" if source_tag == "mic" else "",
             "you": source_tag == "mic",
             "lang": info.language,
             "langs": spoken,
@@ -330,7 +327,7 @@ def make_process_segment(targets, out_queue):
 def main():
     saved = settings.load()
     parser = argparse.ArgumentParser(
-        description="Live translator for Discord/system audio. Options left out come from the last run "
+        description="Live subtitles and translation for your PC's audio. Options left out come from the last run "
                     "(settings.json).")
     parser.add_argument(
         "--target", "-t", default=None,
@@ -343,10 +340,6 @@ def main():
              "(default: qwen3-asr-1.7b if installed, else large-v3)",
     )
     parser.add_argument("--no-mic", action="store_true", help="Don't also capture your microphone")
-    parser.add_argument(
-        "--discord-bridge-port", type=int, default=None,
-        help=f"Port the optional Discord speaking-bridge WebSocket server listens on (default: {discord_bridge.DEFAULT_PORT})",
-    )
     args = parser.parse_args()
 
     target_arg = args.target or ",".join(saved["targets"]) or "en"
@@ -357,7 +350,6 @@ def main():
 
     speech_options["language"] = saved["language"]
     speech_options["context"] = saved["context"]
-    speech_options["auto_names"] = saved["auto_names"]
     live_options["interval"] = saved["live_interval"]
     live_options["translate"] = saved["translate_live"]
     capture_options["caption_mic"] = saved["caption_mic"]
@@ -371,7 +363,6 @@ def main():
         targets,
         model_size=args.model or saved["model"],
         capture_mic=saved["mic"] and not args.no_mic,
-        bridge_port=args.discord_bridge_port or saved["bridge_port"],
     )
 
 

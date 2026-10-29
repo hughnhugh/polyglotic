@@ -1,7 +1,6 @@
-"""Verifies VAD-cut speech (the mic, and loopback when the Discord bridge is
-idle) gets the same growing live caption -> final -> join treatment as
-Discord intervals, by driving overlay_core._capture_loop_inner with
-synthetic audio and a stand-in VAD that calls any loud frame speech - no
+"""Verifies VAD-cut speech (the mic and system audio) gets growing live
+captions, a final caption replacing them, and back-to-back utterances
+joined, by driving overlay_core._capture_loop_inner with synthetic audio and a stand-in VAD that calls any loud frame speech - no
 GPU/model needed."""
 
 import queue

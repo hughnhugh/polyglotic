@@ -60,8 +60,8 @@ def main():
     assert "    -> [en] I think this place is great" in log.getvalue()
     print("OK: log keeps finals only, with live update counts and translations")
 
-    board.apply("[Discord bridge: connected]")
-    assert board.notices[-1] == "[Discord bridge: connected]" and len(board.captions) == 4
+    board.apply("[Capturing system audio: Speakers]")
+    assert board.notices[-1] == "[Capturing system audio: Speakers]" and len(board.captions) == 4
     print("OK: notices kept apart from captions")
 
     small = captions.CaptionBoard(max_history=3)
@@ -72,13 +72,13 @@ def main():
 
     # White is what was said; yellow is a translation - into the overlay's
     # language, or for a line already in it, into its second language.
-    cap = captions.Caption(key=1, speaker="Caleb", is_you=False, lang="en", native="Who took the car",
+    cap = captions.Caption(key=1, speaker="Alex", is_you=False, lang="en", native="Who took the car",
                            translations={"en": ("Who took the car", False), "zh": ("谁开走了车", True)},
                            group=None, live=False, delay=None, proc=None)
     assert cap.lines_for("en") == ("Who took the car", None)
     assert cap.lines_for("en", second="zh") == ("Who took the car", "谁开走了车")
     assert cap.lines_for("zh") == ("Who took the car", "谁开走了车")
-    cap = captions.Caption(key=2, speaker="marina", is_you=False, lang="zh", native="我觉得很好",
+    cap = captions.Caption(key=2, speaker="Mai", is_you=False, lang="zh", native="我觉得很好",
                            translations={"en": ("I think it's great", True), "zh-hant": ("我覺得很好", False)},
                            group=None, live=False, delay=None, proc=None)
     assert cap.lines_for("en", second="zh-hant") == ("我觉得很好", "I think it's great")

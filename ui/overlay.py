@@ -200,7 +200,7 @@ class CaptionBlock(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        # Who said it, and in what language - "marina  Mandarin"
+        # Who said it, and in what language - "Mai  Mandarin"
         self.head = QWidget()
         head = QHBoxLayout(self.head)
         head.setContentsMargins(0, 0, 0, 0)

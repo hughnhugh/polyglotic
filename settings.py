@@ -1,8 +1,8 @@
 """
 Settings remembered between launches, in settings.json next to the app, so
 a plain launch comes back the way it was last left: target languages,
-speech model, mic capture, the Discord bridge port, the speech model's
-conversation language and context words, live caption timing, and the
+speech model, mic capture, the speech model's conversation language and
+context words, live caption timing, and the
 subtitle overlays' look, positions and lock. Command-line options still
 override them for that run.
 """
@@ -32,10 +32,8 @@ DEFAULTS = {
     "mic": True,
     "mic_device": None,     # microphone by name; None = Windows' default
     "caption_mic": True,    # caption your own speech (the mic is still captured for nothing else)
-    "bridge_port": 8765,
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES
     "context": "",          # names/slang passed to the speech model to bias its spelling
-    "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
     # Subtitle overlays (ui/overlay.py)

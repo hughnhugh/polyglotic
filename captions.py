@@ -8,15 +8,15 @@ transcribed segment, carrying the original text and its translation into
 every target language at once. Records come in three kinds:
 
 - a final caption, either standalone or ending a caption group - replacing
-  the group's current caption, and any absorbed groups' (a speaker's
-  back-to-back speech joined into one, see overlay_core.BRIDGE_JOIN_GAP_SEC),
+  the group's current caption, and any absorbed groups' (a source's
+  back-to-back speech joined into one, see overlay_core.JOIN_GAP_SEC),
   in the earliest one's place;
 - a live update of a caption group (final=False), shown in place until the
   final caption replaces it - long live captions grow in sections (see
   overlay_core.LIVE_SECTION_SEC), shown joined;
 - a removal (final, native None) - a group's live caption taken back.
 
-Plain strings are notices (model loading, Discord connecting...) - logged,
+Plain strings are notices (model loading, audio device changes...) - logged,
 and shown in the main window rather than in overlays.
 
 Pure Python, no GUI - so it's tested directly (test_captions.py).
@@ -33,7 +33,7 @@ MAX_HISTORY = 300  # captions kept; older ones drop off the front
 @dataclass
 class Caption:
     key: int                  # unique, stable across updates - views use it to reuse widgets
-    speaker: str              # "" when unknown (no Discord bridge)
+    speaker: str              # who or what it came from - "You" for your mic, "" for system audio
     is_you: bool              # your own mic
     lang: str                 # the speech's (main) language code
     native: str               # what was said, in its own language

@@ -5,7 +5,7 @@ The main window: a sidebar and six pages.
   Transcript  - this session's captions, every language side by side
   Languages   - what to translate into, what's being spoken, names & slang
   Captions    - how the overlays look and when they update, with a preview
-  Audio       - system audio, microphone, the Discord bridge
+  Audio       - system audio, microphone
   Models      - speech model choice, translator, GPU memory
 
 Closing it keeps the app running in the tray; Quit (sidebar or tray) exits.
@@ -17,7 +17,7 @@ from PySide6.QtCore import QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QTextCursor
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QPushButton, QScrollArea,
-                               QSlider, QSpinBox, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
+                               QSlider, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 import settings
 from captions import Caption
@@ -49,10 +49,6 @@ LIVE_CHOICES = [None, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6]
 def _status_of(key, text):
     """(dot colour, short description) for a subsystem's raw status line."""
     text = text or ""
-    if key == "discord_bridge":
-        if text.startswith("Connected"):
-            return theme.SUCCESS, "Connected"
-        return theme.TEXT_FAINT, "Not connected - captions won't have names"
     if text.startswith("Capturing"):
         return theme.SUCCESS, text.split(": ", 1)[-1]
     if text.startswith("Ready"):
@@ -181,7 +177,7 @@ class HomePage(QWidget):
         health = Card("Status")
         self.lines = {key: _StatusLine(name) for key, name in [
             ("whisper_model", "Speech model"), ("translator", "Translator"), ("loopback", "System audio"),
-            ("mic", "Microphone"), ("discord_bridge", "Discord")]}
+            ("mic", "Microphone")]}
         for line in self.lines.values():
             health.add(line)
         gpu_row = QHBoxLayout()
@@ -253,9 +249,6 @@ class HomePage(QWidget):
         parts = []
         if c.targets:
             parts.append("Captions in " + ", ".join(LANGUAGE_NAMES.get(t, t) for t in c.targets))
-        if str(status.get("discord_bridge", "")).startswith("Connected"):
-            people = len(c.discord_people())
-            parts.append(f"Discord connected{f' ({people} in call)' if people else ''}")
         if not c.caption_mic:
             parts.append("your speech not captioned")
         if c.overlays_hidden:
@@ -421,7 +414,7 @@ class LanguagesPage(QWidget):
         targets.add(self.list)
         content.addWidget(targets)
 
-        spoken = Card("Spoken language", "Auto-detect handles mixed calls. For a call entirely in one language, "
+        spoken = Card("Spoken language", "Auto-detect handles mixed languages. For audio entirely in one language, "
                                          "choosing it stops short or mumbled speech being misheard as another "
                                          "language - but anything said in a different language is then shown "
                                          "untranslated.")
@@ -446,13 +439,9 @@ class LanguagesPage(QWidget):
         names = Card("Names & slang", "Words the speech model should spell your way - people's names, game "
                                       "terms, in-jokes. Separate them with commas.")
         self.context = QLineEdit(speech_options["context"])
-        self.context.setPlaceholderText("e.g. Caleb, HSK, bún bò Huế, Valorant")
+        self.context.setPlaceholderText("e.g. Alex, HSK, bún bò Huế, Valorant")
         self.context.editingFinished.connect(lambda: controller.set_context(self.context.text().strip()))
         names.add(self.context)
-        self.auto_names = ToggleSwitch(speech_options["auto_names"])
-        self.auto_names.toggled.connect(controller.set_auto_names)
-        names.add(SettingRow("Add the names of people in the Discord call", "Needs the Discord plugin. "
-                             "Names that read like a status rather than a name are skipped.", self.auto_names))
         self.preview = label("", "Faint", wrap=True)
         names.add(self.preview)
         content.addWidget(names)
@@ -534,10 +523,10 @@ class _PreviewPanel(QWidget):
     """A mock overlay over a game-like backdrop, drawn with the current look."""
 
     SAMPLES = [
-        Caption(key=1, speaker="marina", is_you=False, lang="yue", native="唔知啊，睇下架車先。",
+        Caption(key=1, speaker="Mai", is_you=False, lang="yue", native="唔知啊，睇下架車先。",
                 translations={"en": ("No idea, check the car first.", True)}, group=None, live=False,
                 delay=None, proc=None),
-        Caption(key=2, speaker="Caleb", is_you=False, lang="yue", native="你將我嘅嘢放去邊啦？",
+        Caption(key=2, speaker="Alex", is_you=False, lang="yue", native="你將我嘅嘢放去邊啦？",
                 translations={"en": ("Where did you put my stuff?", True)}, group=None, live=False,
                 delay=None, proc=None),
     ]
@@ -608,7 +597,7 @@ class CaptionsPage(QWidget):
         language.toggled.connect(lambda on: controller.set_pref("show_language", on))
         speakers = ToggleSwitch(prefs["show_speakers"])
         speakers.toggled.connect(lambda on: controller.set_pref("show_speakers", on))
-        look.add(SettingRow("Speaker names", "From the Discord plugin; your own speech shows as “You”.",
+        look.add(SettingRow("Speaker names", "Your own speech shows as “You”.",
                             speakers))
         look.add(SettingRow("Spoken language", "Which language each caption was spoken in, beside the name.",
                             language))
@@ -708,7 +697,7 @@ class AudioPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
 
-        system = Card("System audio", "Everything your PC plays - Discord, videos, games - from your default "
+        system = Card("System audio", "Everything your PC plays - videos, streams, games - from your default "
                                       "output device. Change that in Windows' sound settings.")
         self.system_line = _StatusLine("Device")
         system.add(self.system_line)
@@ -731,25 +720,6 @@ class AudioPage(QWidget):
         mic.add(self.mic_line)
         content.addWidget(mic)
 
-        discord = Card("Discord", "With the companion Vencord plugin, captions get people's names, and are cut "
-                                  "exactly where each person starts and stops talking. Without it, captions "
-                                  "still work, unlabelled.")
-        self.discord_line = _StatusLine("Plugin")
-        discord.add(self.discord_line)
-        self.people = label("", "Faint", wrap=True)
-        discord.add(self.people)
-        port_box = QWidget()
-        port_row = QHBoxLayout(port_box)
-        port_row.setContentsMargins(0, 0, 0, 0)
-        self.port = QSpinBox()
-        self.port.setRange(1024, 65535)
-        self.port.setValue(controller.pipeline.bridge_port)
-        self.port.setFixedWidth(90)
-        port_row.addWidget(self.port)
-        port_row.addWidget(button("Apply", None, lambda: controller.set_bridge_port(self.port.value())))
-        discord.add(SettingRow("Plugin port", "Only if 8765 is taken - set the same port in the plugin's settings.",
-                               port_box))
-        content.addWidget(discord)
         content.addStretch(1)
 
         controller.status_changed.connect(lambda _: self.refresh())
@@ -777,10 +747,6 @@ class AudioPage(QWidget):
         status = self.c.status
         self.system_line.set(*_status_of("loopback", status.get("loopback")))
         self.mic_line.set(*_status_of("mic", status.get("mic")))
-        self.discord_line.set(*_status_of("discord_bridge", status.get("discord_bridge")))
-        people = self.c.discord_people() if str(status.get("discord_bridge", "")).startswith("Connected") else []
-        self.people.setText(f"In the call: {', '.join(people)}" if people else "")
-        self.people.setVisible(bool(people))
         for toggle, value in ((self.mic_on, self.c.mic_enabled), (self.caption_mic, self.c.caption_mic)):
             if toggle.isChecked() != value:
                 toggle.setChecked(value)

@@ -21,7 +21,7 @@ WARNING = "#fbbf24"
 DANGER = "#f87171"
 
 # Speaker name colours on the overlay - distinct, readable on dark, and
-# stable per name (a speaker keeps theirs all session, like on Discord).
+# stable per name (a speaker keeps theirs all session).
 SPEAKER_COLORS = ["#7cc4ff", "#ffb86b", "#c9a7ff", "#7ee0a8", "#ff8fa3", "#f5d76e", "#6fe0e0", "#ffa3e0"]
 
 

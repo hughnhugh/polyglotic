@@ -19,7 +19,6 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QRect, QTimer, S
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-import discord_bridge
 import overlay_core
 import settings
 from captions import CaptionBoard
@@ -56,7 +55,7 @@ class Controller(QObject):
     prefs_changed = Signal()     # overlay look, timing, speech options
     notice = Signal(str)
 
-    def __init__(self, targets, pipeline_factory, model_size, capture_mic, bridge_port):
+    def __init__(self, targets, pipeline_factory, model_size, capture_mic):
         super().__init__()
         saved = settings.load()
         self.targets = targets                    # languages with an overlay
@@ -80,7 +79,7 @@ class Controller(QObject):
         overlay_core.register_broadcast_queues([self.caption_queue])  # notices arrive with the captions
         self._status_queue = queue.Queue()
         overlay_core.status.subscribe(self._status_queue)
-        self.pipeline = pipeline_factory(self.caption_queue, self.translate_into, model_size, capture_mic, bridge_port,
+        self.pipeline = pipeline_factory(self.caption_queue, self.translate_into, model_size, capture_mic,
                                          saved["mic_device"])
 
         self._poll = QTimer(self, interval=40, timeout=self._drain)
@@ -262,11 +261,6 @@ class Controller(QObject):
         settings.update(context=text)
         self.prefs_changed.emit()
 
-    def set_auto_names(self, on):
-        speech_options["auto_names"] = on
-        settings.update(auto_names=on)
-        self.prefs_changed.emit()
-
     def set_live_interval(self, seconds):
         live_options["interval"] = seconds
         settings.update(live_interval=seconds)
@@ -279,13 +273,6 @@ class Controller(QObject):
 
     def set_model(self, size):
         self.pipeline.model_holder.request_reload(size)
-
-    def set_bridge_port(self, port):
-        self.pipeline.set_bridge_port(port)
-        settings.update(bridge_port=port)
-
-    def discord_people(self):
-        return discord_bridge.channel_names()
 
     def open_logs_folder(self):
         os.startfile(LOG_DIR)  # noqa: S606 - opens Explorer on our own folder
@@ -370,7 +357,7 @@ def _tray(controller, show_main):
     return tray
 
 
-def run(make_process_segment, targets, model_size, capture_mic, bridge_port):
+def run(make_process_segment, targets, model_size, capture_mic):
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
@@ -385,10 +372,10 @@ def run(make_process_segment, targets, model_size, capture_mic, bridge_port):
     app.setFont(theme.ui_font())
     app.setStyleSheet(theme.STYLESHEET)
 
-    def pipeline_factory(caption_queue, translate_into, model, mic, port, mic_device):
-        return overlay_core.Pipeline(make_process_segment(translate_into, caption_queue), model, mic, port, mic_device)
+    def pipeline_factory(caption_queue, translate_into, model, mic, mic_device):
+        return overlay_core.Pipeline(make_process_segment(translate_into, caption_queue), model, mic, mic_device)
 
-    controller = Controller(targets, pipeline_factory, model_size, capture_mic, bridge_port)
+    controller = Controller(targets, pipeline_factory, model_size, capture_mic)
 
     from ui.main_window import MainWindow  # local import - it imports this module
     window = MainWindow(controller)
