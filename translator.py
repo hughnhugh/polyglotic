@@ -3,8 +3,8 @@ Text translation via Tencent's Hy-MT2-7B (a translation-tuned LLM), served
 by a local llama.cpp `llama-server` child process - both fetched into bin/
 and models/ by setup.ps1.
 
-Replaced NLLB-200 after a side-by-side on real captions from logs/ (see
-eval/compare_translators.py): far better on short, casual voice-chat lines
+Replaced NLLB-200 after a side-by-side on real captions: far better on
+short, casual voice-chat lines
 (fillers, fragments, slang), which NLLB rendered stiffly or decoded into
 repetition loops, and better than Whisper's own X->English translate task,
 which occasionally invented content outright.

@@ -1,28 +1,33 @@
 # vc-translator
 
-Live translator for Discord (or any Windows system audio). Captures your PC's
-audio output via WASAPI loopback plus your microphone, detects speech with
-Silero VAD (or Discord's own speaking events), transcribes it with
-Qwen3-ASR or Whisper, and translates it into the languages of your choosing with Hy-MT2-7B, a translation-tuned LLM
-served by a local llama.cpp server — all running locally on your GPU, no
-cloud APIs.
+Live subtitles and translation for anything your PC plays - videos,
+streams, games, lectures. Captures your PC's audio output via WASAPI
+loopback plus your microphone, detects speech with Silero VAD, transcribes
+it with Qwen3-ASR or Whisper, and translates it into the languages of your
+choosing with Hy-MT2-7B, a translation-tuned LLM served by a local
+llama.cpp server — all running locally on your GPU, no cloud APIs.
 
-Captions appear as subtitles over your game or video - the translation,
-the original underneath, and who said it - one overlay per language you
+Captions appear as subtitles over your game or video - the translation
+with the original underneath - one overlay per language you
 translate into (e.g. English and Chinese at once). Audio capture and
 transcription happen once per spoken segment and are shared across every
 language; only the (cheap) translation step runs once per language. A main
-window holds the settings and a searchable transcript of the session.
+window holds the settings and a searchable transcript of the session,
+kept on screen only unless you choose to save it.
+
+> Looking for the Discord voice-chat version, with speaker names from a
+> Vencord plugin? It lives on the [`discord`](https://github.com/hughnhugh/vc-translator/tree/discord) branch.
 
 ## Requirements
 
 - **Windows 10/11.** This uses WASAPI loopback audio capture and Win32-specific
-  packages - it will not run on macOS/Linux.
+  packages - it doesn't run on macOS/Linux yet (Linux is on the
+  [roadmap](#roadmap)).
 - **An NVIDIA GPU with CUDA support, and a recent driver (580 or newer -
   CUDA 13).** Whisper and the translation model are heavy - this isn't
   optional, there's no CPU fallback mode. **12GB+ VRAM recommended**: the
   translator takes ~5GB and Whisper `large-v3` ~4GB, plus whatever else
-  (games, browser, Discord) is using the GPU. Smaller Whisper models (see
+  (games, browser) is using the GPU. Smaller Whisper models (see
   Options below) free up some of that.
 - **Python 3.12.** Get it from [python.org/downloads](https://www.python.org/downloads/)
   - during install, check **"Add python.exe to PATH"**, and check
@@ -58,7 +63,7 @@ that one run, without changing any system-wide setting.
 python -m venv venv
 .\venv\Scripts\python.exe -m pip install --upgrade pip
 .\venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented websockets PySide6
+.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented PySide6
 .\venv\Scripts\python.exe -m pip install nvidia-ml-py
 ```
 
@@ -91,9 +96,8 @@ changing things and reading back. Closing it keeps the app running in the
 One per language you translate into, centred near the bottom of the screen
 to start with. Captions run newest at the bottom, with one colour rule:
 **white is what was said**, in its own language, and **yellow, under it,
-is always a translation** - into the overlay's language. Above each is who
-said it, in their own colour (names come from the Discord plugin; your own
-speech shows as "You"), and the language it was spoken in. Lines already in
+is always a translation** - into the overlay's language. Above each is the
+language it was spoken in, and "You" for your own speech. Lines already in
 the overlay's language have no yellow line - unless you give the overlay a
 **second language** (Languages page): then they're translated into that,
 so one overlay serves readers of both. E.g. an English overlay with
@@ -103,7 +107,7 @@ and your English with Chinese under it.
 Text has a dark outline, like film subtitles, so it stays readable over
 bright scenes even with the background panel turned right down. A caption
 still being spoken updates live, trailing off with `…`, and settles when
-the speaker pauses. When nobody's talking for a few seconds the captions
+the speech pauses. When nothing's said for a few seconds the captions
 fade away. The bigger you make an overlay, the more history it shows.
 
 - **Locked** (the default once you're set up): clicks pass straight
@@ -129,29 +133,23 @@ game to borderless.
 - **Home** - whether it's listening, a Pause button, the everyday toggles
   (caption your own speech, lock and show overlays, show the original
   under translations), the languages being captioned, and the status of
-  each part - speech model, translator, audio, Discord - with GPU memory.
+  each part - speech model, translator, audio - with GPU memory.
 - **Transcript** - everything captioned this session, every language side
-  by side, searchable, with Copy all and a link to the logs folder.
+  by side, searchable, with Copy all, and **Save to logs folder** (off by
+  default - see [Privacy](#privacy)).
 - **Languages** - what to translate into (each gets an overlay), the
   spoken language, and names & slang:
   - **Spoken language** - Auto-detect (default), or English, Mandarin,
     Cantonese or Vietnamese. Choosing one skips the speech model's
     language detection, so short or mumbled speech can't be misread as
-    another language (Thai, Malay...). Use it for calls entirely in one
+    another language (Thai, Malay...). Use it for audio entirely in one
     language: anything said in another is still written down, but labeled
     as the chosen one - so it isn't translated in that language's overlay.
   - **Names & slang** - comma-separated words the speech model should
-    spell your way (people's names, game terms, "HSK", "bún bò"...).
-    With "Add the names of people in the Discord call" on (the default)
-    and the Discord plugin connected, the names of the people in your
-    voice channel are added automatically, following people joining and
-    leaving - the line underneath shows exactly what the model is given.
-    Emoji and decorations are stripped from names, ones that read more
-    like a status than a name (just symbols, over two words or 16
-    characters, Chinese over 4 characters) are left out, and at most 12
-    are used, most recent speakers first. Given a short or unclear clip,
-    the speech model sometimes "transcribes" the list itself - a caption
-    that's just names read back is dropped.
+    spell your way (names, game terms, "HSK", "bún bò"...) - the line
+    underneath shows exactly what the model is given. Given a short or
+    unclear clip, the speech model sometimes "transcribes" the list itself
+    - a caption that's just those words read back is dropped.
 - **Captions** - how the overlays look and behave, with a live preview:
   text size, background opacity, speaker names, the white line above
   translations, how soon they fade, and live
@@ -159,8 +157,7 @@ game to borderless.
 - **Audio** - which microphone (Windows' default, or pick one - it
   switches straight away and is remembered), system audio (Windows'
   default output), whether your own speech is captioned (off saves GPU
-  time), and the Discord plugin's connection, who's in the call, and its
-  port.
+  time).
 - **Models** - the speech model (switching takes a few seconds, during
   which captions pause) and the translator's status.
 
@@ -172,30 +169,31 @@ main language's overlay - the whole line rewritten in that language, so
 the English bits come out in Chinese too ("反正这就是个非常具体的文化概念啦"),
 translated in context rather than piece by piece.
 
-Your mic only captions you. With headphones, Discord can leak faintly into
-the mic, and a small noise of yours (a click, a tap, a breath) can open a
-mic segment that then picks up whoever's talking. Before transcribing, the
+Your mic only captions you. The PC's audio can leak faintly into the mic
+(from headphones, or speakers), and a small noise of yours (a click, a
+tap, a breath) can open a mic segment that then picks up whatever's
+playing. Before transcribing, the
 app checks whether the mic's loudness follows what the PC was playing - a
 leaked copy does, your voice doesn't (even talking over someone) - and
-drops leaks. As a backup, a "You" caption repeating what someone else said
-in the last few seconds is dropped, or taken back if theirs arrives after
-it.
+drops leaks. As a backup, a "You" caption repeating what the PC played in
+the last few seconds is dropped, or taken back if that caption arrives
+after it.
 
 ### How captions update
 
-While someone's talking, their caption appears live and grows as they go -
-every 1.5 seconds by default, what they've said is transcribed again and
+While speech is going on, its caption appears live and grows as it goes -
+every 1.5 seconds by default, what's been said is transcribed again and
 the caption updates in place, extending and correcting itself as more
-context arrives. When they pause, the whole stretch is transcribed once
-more in one go and replaces it. If the same person carries on within 2
-seconds, with nobody else captioned in between, their new speech is
-joined onto that caption and the whole run re-transcribed and
+context arrives. At a pause, the whole stretch is transcribed once more
+in one go and replaces it. If the same source (the PC, or your mic)
+carries on within 2 seconds, with nothing else captioned in between, the
+new speech is joined onto that caption and the whole run re-transcribed and
 re-translated as one. Speech running over 20 seconds without a pause is
 captioned in 20-second pieces.
 
 Captions' **"Live updates every"** box sets the update interval: pick a
 suggestion or type any number of seconds from 0.5 to 20, or `Off` for no
-live captions (each appears only once the speaker pauses). Shorter feels
+live captions (each appears only at a pause). Shorter feels
 more live but uses more GPU time; it can't build a backlog, though - when
 the GPU's busy, waiting live updates are replaced by newer ones rather
 than queued, and captions finishing a pause always go first. **"Translate
@@ -204,9 +202,10 @@ show the original and translate on the pause. Long live captions grow in
 6-second sections, so each update stays quick (transcription time grows
 with the audio: ~0.35s for 1.5s of speech, ~1.1s for 6s, ~3.5s for 20s).
 
-Each session is logged to `logs/Session_<date>_<time>.log`: every final
-caption with its translations, the delay from the end of the speech to it
-appearing, processing time alone (`proc`) and how many live updates it had
+With **Save to logs folder** on, the session is written to
+`logs/Session_<date>_<time>.log`: every final caption with its
+translations, the delay from the end of the speech to it appearing,
+processing time alone (`proc`) and how many live updates it had
 (`live x3`).
 
 ### Options
@@ -225,7 +224,6 @@ Anything left out comes from the last run.
   below) or a Whisper size (first run: `qwen3-asr-1.7b` if it's installed,
   else `large-v3`).
 - `--no-mic` - don't capture your microphone.
-- `--discord-bridge-port PORT` - the Discord plugin's port (default 8765).
 
 ## Qwen3-ASR speech model (optional)
 
@@ -257,46 +255,27 @@ Whisper's confidence scores, which the app uses to catch made-up text, don't
 exist for Qwen3-ASR - it relies on the VAD gate and Qwen's own "no speech"
 signal instead.
 
-## Speaker identification (optional, Discord only, advanced setup)
+## Privacy
 
-This part is meaningfully harder to set up than everything above - it needs
-a full Vencord *source* build (there's no marketplace install, since this
-plugin isn't an official Vencord one), which means Git, Node.js, and `pnpm`,
-not just Python. `vc-translator` is fully usable without it - you only need
-this if you specifically want real Discord usernames attached to captions
-instead of unlabeled ones. See `vencord-plugin/README.md` for the full
-build/install steps if you want it.
+Everything runs on your own machine - audio, transcription and
+translation never leave it. Captions are kept in memory for the session
+and gone when you quit, unless you turn on **Save to logs folder** on the
+Transcript page; `logs/` and `settings.json` are gitignored either way.
+If you caption other people (a call, say), only save transcripts with
+their agreement.
 
-Speaker labels come only from ground truth, never a guess: a companion
-Vencord plugin (`vencord-plugin/discordSpeakingBridge.ts`) reads Discord's
-own "who is currently speaking" state (the same signal behind the green
-speaking ring in the UI) and the real username, and pushes that to a small
-local WebSocket server `translate_vc.py` runs (`--discord-bridge-port`,
-default `8765`, also changeable on the Audio page). When connected,
-loopback-audio segment boundaries and labels come straight from Discord's
-own speaking start/stop events. See `vencord-plugin/README.md` for
-build/install steps. Home and the Audio page show whether it's connected
-and who's in the call. Note changing the port in the app only affects the
-Python side -
-the Vencord plugin has its own separate `port` setting to match.
+## Roadmap
 
-Without the plugin connected, `vc-translator` works exactly the same, just
-with unlabeled captions for system audio (your own mic captions, "You", are
-always labeled). Note the bridge can't isolate simultaneous speakers' audio
-from each other (that would need a bot with real per-user voice-receive) -
-it only improves *identity and segment timing* on top of the existing
-mixed loopback audio. Some rules keep that mixing from producing wrong
-captions:
-
-- When two people are flagged as speaking over the same audio (say, one's
-  mic picking up the other), it's captioned once, not twice.
-- Someone flagged as speaking for over 20 seconds straight - usually an
-  open mic held on by background noise - can't cause anyone else's speech
-  to be skipped that way, and their live captions are skipped while the
-  audio is mostly other people talking.
-- A reply that starts in someone's last second or so is cut off the end of
-  their caption, and a joined caption never spans a gap someone else spoke
-  in.
+- **Per-app capture** - caption one app (a video player, a browser, a
+  game) on its own, or several side by side, each labelled with the app
+  it came from, through Windows' per-process loopback capture - rather
+  than everything on the default output device mixed together.
+- **A cross-platform core** - capture split from the speech pipeline
+  (VAD, transcription, translation, caption timing), so the pipeline runs
+  and is tested on Linux - WSL2 included - from audio files, and Linux
+  gets its own capture backend through PipeWire.
+- **A UI for several sources** - choosing apps to caption, and telling
+  their captions apart on the overlays and in the transcript.
 
 ## Notes
 
@@ -309,14 +288,12 @@ captions:
   automatically if the app crashes, so it can't leave VRAM tied up); its
   log goes to `logs/llama-server.log`. It loads in the background at
   startup - captions show the native text alone until it's ready.
-- The translator is told it's working on casual, speech-recognized voice
-  chat, so it keeps a spoken register (slang, fillers, reactions) rather
-  than formalizing it. Hy-MT2 replaced NLLB-200 after a side-by-side on real
-  captions - `eval/compare_translators.py` reruns that comparison.
+- The translator is told it's working on casual, speech-recognized
+  speech, so it keeps a spoken register (slang, fillers, reactions) rather
+  than formalizing it. Hy-MT2 replaced NLLB-200 after a side-by-side
+  comparison on casual speech.
 - Chinese speech is normalized to Simplified for display; pick `--target
   zh-hant` if you want Traditional output instead.
-- Every session's captions are logged to `logs/Session_<date>_<time>.log`
-  (gitignored), every target language together.
 
 ## Troubleshooting
 
@@ -344,12 +321,11 @@ captions:
 - **Symlink warning from `huggingface_hub` on first run.** Harmless - Windows
   needs Developer Mode or admin rights for symlinks; without them, model
   files are just copied instead, using a bit more disk space.
-- **No captions ever appear for other people talking.** Check the overlay's
-  status line for `[Capturing system audio: ...]` - it should name your
-  actual output device (headphones/speakers). If Discord's output device
-  differs from your Windows default output device, loopback capture won't
-  hear it - either match them, or see PyAudioWPatch's docs for capturing a
-  specific device.
+- **No captions ever appear for what the PC plays.** Check Home's System
+  audio status - it should name your actual output device
+  (headphones/speakers). If an app plays to a different device than your
+  Windows default output, loopback capture won't hear it - either match
+  them, or see PyAudioWPatch's docs for capturing a specific device.
 - **Model switch / GPU memory reading not moving.** The Models page's
   status line is the source of truth for whether a model switch actually
   completed (`Ready (size)`); Home's GPU readout needs `nvidia-ml-py`
