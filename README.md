@@ -332,3 +332,8 @@ their agreement.
   installed (see Setup above).
   A failed switch to Qwen3-ASR reverts to the previous model - its server
   log is `logs/qwen-asr-server.log`.
+
+## License
+
+MIT - see [LICENSE](LICENSE). The models it downloads (Silero VAD, Whisper,
+Qwen3-ASR, Hy-MT2) and llama.cpp come under their own licenses.
