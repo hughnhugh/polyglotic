@@ -36,6 +36,7 @@ DEFAULTS = {
     "context": "",          # names/slang passed to the speech model to bias its spelling
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
+    "save_transcript": False,  # write each session's captions to logs/ (off: they're only ever on screen)
     # Subtitle overlays (ui/overlay.py)
     "overlay": {
         "text_scale": 1.0,      # x the default text size

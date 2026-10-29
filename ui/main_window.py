@@ -273,8 +273,8 @@ class TranscriptPage(QWidget):
         layout.setContentsMargins(36, 30, 36, 24)
         layout.setSpacing(14)
         layout.addWidget(label("Transcript", "PageTitle"))
-        layout.addWidget(label("Everything captioned this session, in every language. "
-                               "Saved to the logs folder as it happens.", "PageSubtitle", wrap=True))
+        layout.addWidget(label("Everything captioned this session, in every language. Kept only while the "
+                               "app runs, unless you save it.", "PageSubtitle", wrap=True))
         bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search the transcript")
@@ -282,6 +282,11 @@ class TranscriptPage(QWidget):
         self.search.textChanged.connect(lambda _: self.render(force=True))
         bar.addWidget(self.search, 1)
         bar.addWidget(button("Copy all", None, self._copy))
+        bar.addSpacing(8)
+        bar.addWidget(label("Save to logs folder"))
+        self.save = ToggleSwitch(controller.save_transcript)
+        self.save.toggled.connect(controller.set_save_transcript)
+        bar.addWidget(self.save)
         bar.addWidget(button("Open logs folder", None, controller.open_logs_folder))
         layout.addLayout(bar)
 

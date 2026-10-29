@@ -71,9 +71,10 @@ class Controller(QObject):
         self.overlays: "dict[str, CaptionOverlay]" = {}
         self.quitting = False
 
-        os.makedirs(LOG_DIR, exist_ok=True)
-        self.log_path = os.path.join(LOG_DIR, f"Session_{datetime.now():%Y%m%d_%H%M%S}.log")
-        self.board = CaptionBoard(log_file=open(self.log_path, "a", encoding="utf-8"))
+        self.board = CaptionBoard()
+        self.log_path = None  # this session's transcript file, while saving is on
+        if saved["save_transcript"]:
+            self._start_log()
 
         self.caption_queue = queue.Queue()
         overlay_core.register_broadcast_queues([self.caption_queue])  # notices arrive with the captions
@@ -274,7 +275,26 @@ class Controller(QObject):
     def set_model(self, size):
         self.pipeline.model_holder.request_reload(size)
 
+    @property
+    def save_transcript(self):
+        return self.log_path is not None
+
+    def set_save_transcript(self, on):
+        if on and self.log_path is None:
+            self._start_log()
+        elif not on and self.log_path is not None:
+            self.board.set_log_file(None)
+            self.log_path = None
+        settings.update(save_transcript=on)
+        self.state_changed.emit()
+
+    def _start_log(self):
+        os.makedirs(LOG_DIR, exist_ok=True)
+        self.log_path = os.path.join(LOG_DIR, f"Session_{datetime.now():%Y%m%d_%H%M%S}.log")
+        self.board.set_log_file(open(self.log_path, "a", encoding="utf-8"))
+
     def open_logs_folder(self):
+        os.makedirs(LOG_DIR, exist_ok=True)
         os.startfile(LOG_DIR)  # noqa: S606 - opens Explorer on our own folder
 
     def shutdown(self):

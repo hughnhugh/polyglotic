@@ -172,6 +172,12 @@ class CaptionBoard:
             del self.captions[i]
         self.captions[first] = caption
 
+    def set_log_file(self, log_file):
+        """Starts (a file) or stops (None) writing finals to a session log."""
+        if self._log is not None:
+            self._log.close()
+        self._log = log_file
+
     def _write_log(self, entry, live_updates=0):
         if self._log is None:
             return
