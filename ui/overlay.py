@@ -11,17 +11,26 @@ resize, x to stop captioning that language - and the mouse wheel scrolls
 back through earlier captions. Scrolled back, the overlay holds still
 while new captions keep arriving, until "Back to live" (or scrolling to
 the bottom) catches it up.
+
+Unlocked, words can be looked up too, in any line: hover one - a Chinese
+word for its pinyin and meaning, an English one for the Chinese for it -
+click to pin the lookup, or drag from it across a longer phrase to look
+that up whole (see ui/lookup.py). Words you've saved are drawn in their
+category's colour (see vocab.py).
 """
 
 import math
 import time
+import unicodedata
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                           QTextLayout, QTextOption)
+                           QTextLayout, QTextLine, QTextOption)
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
 
+import dictionary
 from ui import theme
+from ui.lookup import context_for
 
 PAD = 14
 FADE_STEP = 0.08          # per 30ms tick - about a third of a second to fade
@@ -32,6 +41,7 @@ HISTORY = 150             # captions an overlay keeps to scroll back through
 BASE_TEXT_PX = 21
 BASE_SPEAKER_PX = 13
 TRANSLATION_COLOR = "#ffd76e"   # classic subtitle yellow
+_SELECTION_COLOR = QColor(124, 156, 255, 105)   # a phrase being dragged across - theme.ACCENT, see-through
 
 
 def caption_lines(caption, target, second, prefs):
@@ -150,6 +160,11 @@ CJK_FAMILIES = {
 SCRIPT_OF_LANGUAGE = {"zh": "simplified", "zh-hant": "traditional", "yue": "traditional", "ja": "japanese"}
 
 
+def _wordlike(char):
+    """Not a space or punctuation - what a dragged-out phrase is trimmed to."""
+    return not char.isspace() and not unicodedata.category(char).startswith("P") and char != "…"
+
+
 def _cjk_share(text):
     letters = [c for c in text if not c.isspace()]
     return sum("\u2e80" <= c <= "\u9fff" or "\uf900" <= c <= "\ufaff" for c in letters) / len(letters) if letters else 0
@@ -241,27 +256,63 @@ class CaptionBlock(QWidget):
                            1.8 * scale)
 
 
-def _text_paths(text, font, width, x=0.0, y=0.0):
-    """(path, height): `text` word-wrapped at `width` as one QPainterPath,
-    its top-left at (x, y)."""
+def _text_layout(text, font, width):
+    """(layout, height): `text` word-wrapped at `width`."""
     layout = QTextLayout(text, font)
     option = QTextOption()
     option.setWrapMode(QTextOption.WrapMode.WrapAtWordBoundaryOrAnywhere)
     layout.setTextOption(option)
     layout.beginLayout()
-    path, h = QPainterPath(), 0.0
+    h = 0.0
     while True:
         line = layout.createLine()
         if not line.isValid():
             break
         line.setLineWidth(max(10.0, width))
         line.setPosition(QPointF(0, h))
-        segment = text[line.textStart():line.textStart() + line.textLength()].rstrip()
-        if segment:
-            path.addText(QPointF(x, y + h + line.ascent()), font, segment)
         h += line.height()
     layout.endLayout()
-    return path, h
+    return layout, h
+
+
+def _text_paths(text, font, width, x=0.0, y=0.0):
+    """(path, height): `text` word-wrapped at `width` as one QPainterPath,
+    its top-left at (x, y)."""
+    paths, _, h = _caption_text(text, font, width, x, y, None)
+    return (paths[0][0] if paths else QPainterPath()), h
+
+
+def _caption_text(text, font, width, x, y, color, spans=()):
+    """([(path, colour)], layout, height): `text` word-wrapped at `width`,
+    its top-left at (x, y) - in `color`, except the (start, end, colour)
+    spans, each drawn in its own. The layout is kept to find the character
+    under the mouse."""
+    layout, h = _text_layout(text, font, width)
+    paths = {}  # colour -> (path, colour)
+
+    def add(start, end, run_color, line):
+        segment = text[start:end]
+        if not segment.strip():
+            return
+        dx = line.cursorToX(start)[0] if start > line.textStart() else 0.0
+        key = run_color.name(QColor.NameFormat.HexArgb) if run_color is not None else None
+        if key not in paths:
+            paths[key] = (QPainterPath(), run_color)
+        paths[key][0].addText(QPointF(x + dx, y + line.y() + line.ascent()), font, segment)
+
+    for i in range(layout.lineCount()):
+        line = layout.lineAt(i)
+        start = line.textStart()
+        end = start + len(text[start:start + line.textLength()].rstrip())
+        at = start
+        for a, b, run_color in spans:
+            a, b = max(a, start), min(b, end)
+            if a < b:
+                add(at, a, color, line)
+                add(a, b, run_color, line)
+                at = b
+        add(at, end, color, line)
+    return list(paths.values()), layout, h
 
 
 class _Item:
@@ -282,6 +333,7 @@ class _Item:
         self.old_pixmap = None   # the previous text while crossfading to a rewrite
         self.cross = 1.0         # 0 -> 1: old text out, new text in
         self.ghost = False       # removed - fading out where it was, taking no space
+        self.lines = []          # [(text, layout, x, y)] its caption lines, to find the word under the mouse
 
 
 class CaptionCanvas(QWidget):
@@ -320,6 +372,10 @@ class CaptionCanvas(QWidget):
         self._timer = QTimer(self, interval=8, timeout=self._animate)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)  # the default ticks unevenly on Windows
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setMouseTracking(True)       # hovering a word looks it up
+        self.hovered = None               # (key, line index, start, end) of the word under the mouse
+        self._selecting = None            # (key, line index, first character, word) from a press on a word
+        self.selection = None             # (key, line index, start, end) of a phrase being dragged across
 
     # -- content ----------------------------------------------------------------
 
@@ -339,15 +395,17 @@ class CaptionCanvas(QWidget):
             lines = caption_lines(caption, target, second, prefs)
             signature = (caption.speaker, caption.lang, caption.langs, caption.live,
                          tuple((text, color.name(QColor.NameFormat.HexArgb)) for text, color, _ in lines), width,
-                         tuple(sorted(prefs.items())))
+                         tuple(sorted(prefs.items())), self.overlay.controller.vocab.version)
             if signature != item.signature:
                 primary = " ".join(text for text, _, _ in lines)
                 rewritten = item.signature is not None and not primary.startswith(item.text.rstrip(" …"))
                 if rewritten:
                     item.old_pixmap, item.cross = item.pixmap, 0.0
                 item.signature, item.text = signature, primary
-                parts, item.height = self._build(caption, lines, prefs, width)
+                parts, item.lines, item.height = self._build(caption, lines, prefs, width)
                 item.pixmap = self._render(parts, width, item.height)
+                if self.hovered and self.hovered[0] == caption.key:
+                    self.hovered = None  # its text moved - found again on the next mouse move
         self.order = keys
         self._layout()
 
@@ -369,14 +427,22 @@ class CaptionCanvas(QWidget):
                 path, h = _text_paths(spoken_languages_label(caption), lang_font, width, x, y)
                 parts.append((path, QColor("#aab2c0"), 1.6 * scale))
             y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
+        vocab = self.overlay.controller.vocab
+        text_lines = []
         for i, (text, color, lang) in enumerate(lines):
             if i:
                 y += self.LINE_GAP
             font = _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang)
-            path, h = _text_paths(text, font, width - 2 * pad, pad, y)
-            parts.append((path, color, 1.8 * scale))
+            spans = []
+            for start, end, saved_color in vocab.spans(text):  # saved words, in their category's colour
+                saved_color = QColor(saved_color)
+                saved_color.setAlphaF(color.alphaF())
+                spans.append((start, end, saved_color))
+            paths, layout, h = _caption_text(text, font, width - 2 * pad, pad, y, color, spans)
+            parts += [(path, path_color, 1.8 * scale) for path, path_color in paths]
+            text_lines.append((text, layout, pad, y))
             y += h
-        return parts, y + pad
+        return parts, text_lines, y + pad
 
     def _render(self, parts, width, height):
         """The caption's outlined text, drawn once into a pixmap."""
@@ -437,6 +503,147 @@ class CaptionCanvas(QWidget):
     def follow(self):
         self.following = True
         self._layout()
+
+    # -- word lookup ----------------------------------------------------------------
+
+    def _word_at(self, pos):
+        """(item, line index, start, end) of the word under `pos` - a
+        dictionary word in Chinese, a run of letters in other languages - or
+        None."""
+        for key in self.order:
+            item = self.items[key]
+            if item.y is None or item.alpha < 0.5:
+                continue
+            top = round(item.y)
+            if not top <= pos.y() < top + item.height:
+                continue
+            for n, (text, layout, x, y) in enumerate(item.lines):
+                for i in range(layout.lineCount()):
+                    line = layout.lineAt(i)
+                    if line.naturalTextRect().translated(x, top + y).contains(pos):
+                        index = line.xToCursor(pos.x() - x, QTextLine.CursorPosition.CursorOnCharacter)
+                        span = dictionary.word_span_at(text, index)
+                        return (item, n, *span) if span else None
+            return None
+        return None
+
+    def _word_rects(self, item, n, start, end):
+        """Where characters start-end of the item's n-th line are drawn, in
+        canvas coordinates - more than one rect if the word wraps."""
+        _, layout, x, y = item.lines[n]
+        rects = []
+        for i in range(layout.lineCount()):
+            line = layout.lineAt(i)
+            a, b = max(start, line.textStart()), min(end, line.textStart() + line.textLength())
+            if a < b:
+                x1, x2 = line.cursorToX(a)[0], line.cursorToX(b)[0]
+                rects.append(QRectF(x + x1, round(item.y) + y + line.y(), x2 - x1, line.height()))
+        return rects
+
+    def _char_at(self, item, n, pos):
+        """The character of the item's n-th line nearest `pos` - dragging
+        across a phrase needn't stay exactly on the text."""
+        text, layout, x, y = item.lines[n]
+        top = round(item.y) + y
+        lines = [layout.lineAt(i) for i in range(layout.lineCount())]
+        line = next((l for l in lines if pos.y() < top + l.y() + l.height()), lines[-1])
+        index = line.xToCursor(pos.x() - x, QTextLine.CursorPosition.CursorOnCharacter)
+        return min(max(index, 0), len(text) - 1)
+
+    def _lookup_for(self, item, n, start, end):
+        """(text, context, anchor on screen) for characters start-end of the
+        item's n-th line - None if its caption has gone."""
+        caption = next((c for c in self.overlay.shown if c.key == item.key), None)
+        if caption is None:
+            return None
+        text = item.lines[n][0]
+        rects = self._word_rects(item, n, start, end)
+        box = rects[0]
+        for rect in rects[1:]:
+            box = box.united(rect)
+        anchor = QRect(self.mapToGlobal(box.topLeft().toPoint()), box.size().toSize())
+        return text[start:end], context_for(caption, text), anchor
+
+    def clear_hover(self):
+        if self.hovered is not None:
+            self.hovered = None
+            self.unsetCursor()
+            self.update()
+        self.overlay.controller.lookup.unhover()
+
+    def mouseMoveEvent(self, event):  # noqa: N802
+        if self._selecting is not None:
+            self._drag_select(event.position())
+            return
+        if event.buttons():
+            event.ignore()
+            return
+        hit = self._word_at(event.position())
+        lookup = self._lookup_for(*hit) if hit else None
+        if lookup is None:
+            self.clear_hover()
+            return
+        hovered = (hit[0].key, *hit[1:])
+        if hovered != self.hovered:
+            self.hovered = hovered
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.update()
+        self.overlay.controller.lookup.hover(*lookup)
+
+    def mousePressEvent(self, event):  # noqa: N802
+        """On a word: a click looks it up, a drag selects a phrase from it
+        (see mouseReleaseEvent). Anywhere else: the overlay's drag."""
+        hit = self._word_at(event.position()) if event.button() == Qt.MouseButton.LeftButton else None
+        if hit is None:
+            event.ignore()
+            return
+        item, n = hit[0], hit[1]
+        self._selecting = (item.key, n, self._char_at(item, n, event.position()), hit)
+        self.clear_hover()
+        event.accept()
+
+    def _drag_select(self, pos):
+        key, n, anchor, _ = self._selecting
+        item = self.items.get(key)
+        if item is None or n >= len(item.lines):
+            return
+        text = item.lines[n][0]
+        current = self._char_at(item, n, pos)
+        low, high = sorted((anchor, current))
+        start, end = dictionary.snap_to_words(text, low, high + 1)  # English by the whole word
+        if self.selection is None and (start, end) == dictionary.snap_to_words(text, anchor, anchor + 1):
+            return  # not off the first character (or English word) yet - still a click
+        self.selection = (key, n, start, end)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self.update()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802
+        """Pins the lookup of the phrase dragged across - its ends trimmed of
+        spaces and punctuation - or, after a plain click, the word."""
+        if self._selecting is None:
+            event.ignore()
+            return
+        target = self._selecting[3]
+        selection, self._selecting, self.selection = self.selection, None, None
+        self.unsetCursor()
+        self.update()
+        item = self.items.get(selection[0]) if selection else None
+        if item is not None and selection[1] < len(item.lines):
+            _, n, start, end = selection
+            text = item.lines[n][0]
+            while start < end and not _wordlike(text[start]):
+                start += 1
+            while end > start and not _wordlike(text[end - 1]):
+                end -= 1
+            if start < end:
+                target = (item, n, start, end)
+        lookup = self._lookup_for(*target)
+        if lookup is not None:
+            self.overlay.controller.lookup.pin(*lookup)
+        event.accept()
+
+    def leaveEvent(self, event):  # noqa: N802
+        self.clear_hover()
 
     # -- animation ----------------------------------------------------------------
 
@@ -520,6 +727,13 @@ class CaptionCanvas(QWidget):
             # Whole pixels: a pixmap at a fractional offset is resampled - softer text.
             y = round(item.y)
             cut_at_top = cut_at_top or y < 0
+            for marked, color in ((self.hovered, QColor(255, 255, 255, 46)), (self.selection, _SELECTION_COLOR)):
+                if marked and marked[0] == item.key and not item.ghost and marked[1] < len(item.lines):
+                    p.setOpacity(item.alpha)
+                    p.setPen(Qt.PenStyle.NoPen)
+                    p.setBrush(color)
+                    for rect in self._word_rects(item, *marked[1:]):
+                        p.drawRoundedRect(rect.adjusted(-3, 0, 3, 0), 5, 5)
             if item.old_pixmap is not None:
                 p.setOpacity(item.alpha * (1 - item.cross))
                 p.drawPixmap(0, y, item.old_pixmap)
@@ -558,6 +772,7 @@ class CaptionOverlay(QWidget):
         self._drag_from = None
         self._shown_version = None
         self._shown_keys: "set[int]" = set()
+        self.shown = []           # the captions on the canvas, as they were when drawn
 
         root = QVBoxLayout(self)
         root.setContentsMargins(PAD + 4, PAD, PAD + 4, PAD)
@@ -575,6 +790,9 @@ class CaptionOverlay(QWidget):
         hint.setStyleSheet(f"color: {theme.TEXT_FAINT}; font-size: 11px;")
         head.addWidget(hint)
         head.addSpacing(6)
+        head.addWidget(self._header_button("", "Assistant - chat about the call, summarise it, help replying. "
+                                           "Opening it switches the local assistant on, closing it off",
+                                           lambda: controller.toggle_chat(self)))
         head.addWidget(self._header_button("", "Lock - clicks pass through to what's underneath (Ctrl+Alt+L)",
                                            lambda: controller.set_locked(True)))
         head.addWidget(self._header_button("", f"Stop {title} captions", lambda: controller.remove_target(target)))
@@ -628,6 +846,7 @@ class CaptionOverlay(QWidget):
             self.show()  # changing window flags hides it
         if locked:
             self._hovered = False
+            self.canvas.hovered = None
             self.go_live()  # can't scroll a click-through overlay - it follows live
         self._update_chrome()
 
@@ -660,6 +879,7 @@ class CaptionOverlay(QWidget):
             return
         self._shown_version = version
         shown = self._captions()
+        self.shown = shown
         self._shown_keys = {c.key for c in shown}
         self.canvas.set_captions(shown, self.target, self.controller.prefs,
                                  self.controller.second_languages.get(self.target))
@@ -668,6 +888,13 @@ class CaptionOverlay(QWidget):
             self._last_seen = newest
             if newest is not None:
                 self._last_activity = time.time()
+        self.update()
+
+    def recolor(self):
+        """Redraws the captions showing - a saved word or its colour changed
+        - without catching up, if scrolled back."""
+        self.canvas.set_captions(self.shown, self.target, self.controller.prefs,
+                                 self.controller.second_languages.get(self.target))
         self.update()
 
     # -- scrolling ------------------------------------------------------------
@@ -761,6 +988,7 @@ class CaptionOverlay(QWidget):
         self._update_chrome()
 
     def mousePressEvent(self, event):  # noqa: N802
+        self.controller.lookup.close_lookup()  # clicked off a word - usually closed already, by losing focus
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_from = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
 
@@ -772,6 +1000,7 @@ class CaptionOverlay(QWidget):
         if self._drag_from is not None:
             self._drag_from = None
             self.controller.save_geometry(self.target, self.geometry())
+        self.controller.lookup.bring_to_front()  # the click brought this overlay up over it
 
 
 def default_geometry(screen_rect, index, count):

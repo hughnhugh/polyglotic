@@ -14,6 +14,12 @@ transcription happen once per spoken segment and are shared across every
 language; only the (cheap) translation step runs once per language. A main
 window holds the settings and a searchable transcript of the session.
 
+For learning Chinese, any Chinese word in the captions can be looked up -
+hover it for its pinyin and meaning, click for the characters inside it,
+save it to a colour category so it stands out whenever it's said again,
+and (optionally) have a small local LLM explain it in context. See
+[Word lookup and saved words](#word-lookup-and-saved-words).
+
 ## Requirements
 
 - **Windows 10/11.** This uses WASAPI loopback audio capture and Win32-specific
@@ -40,7 +46,9 @@ window holds the settings and a searchable transcript of the session.
 folder. It finds your Python install, creates the project's virtual
 environment (`venv\`), installs everything, and downloads the translator - a
 prebuilt llama.cpp server into `bin\` and the Hy-MT2-7B model (4.6GB) into
-`models\` - printing clear errors if something's missing (e.g. no Python
+`models\` - and the CC-CEDICT dictionary and word frequencies for word lookups
+(9MB, into `data\`),
+printing clear errors if something's missing (e.g. no Python
 found, or no NVIDIA GPU detected). Safe to re-run any time - it reuses an
 existing `venv\` and existing downloads rather than redoing them, so
 re-running after a `git pull` just catches up on anything new, and
@@ -119,6 +127,14 @@ fade away. The bigger you make an overlay, the more history it shows.
 - **Ctrl+Alt+H** hides/shows all overlays; **Ctrl+Alt+P** pauses/resumes
   captioning (nothing's transcribed while paused). These hotkeys work over
   games.
+- Unlocked, the **chat icon** in an overlay's header opens the assistant
+  side chat beside it - see [the local
+  assistant](#the-local-assistant-optional).
+- Unlocked, **hover any word** to look it up - Chinese, or the English of a
+  translation for the Chinese for it - click it to keep the lookup open, or
+  drag from it across a longer phrase - see [Word lookup and saved
+  words](#word-lookup-and-saved-words). Words you've saved are drawn in
+  their category's colour, locked or not.
 
 Overlays sit on top of windowed and borderless-fullscreen games. In
 exclusive fullscreen, Windows puts the game above everything - switch the
@@ -131,7 +147,12 @@ game to borderless.
   under translations), the languages being captioned, and the status of
   each part - speech model, translator, audio, Discord - with GPU memory.
 - **Transcript** - everything captioned this session, every language side
-  by side, searchable, with Copy all and a link to the logs folder.
+  by side, searchable, with Copy all and a link to the logs folder. Hover
+  a Chinese word to look it up; click it - or select a phrase - to keep
+  the lookup open.
+- **Vocabulary** - the words you've saved and their categories: rename
+  categories, change their colours, add or delete them, move a word
+  between them or remove it, and look up any word by typing it.
 - **Languages** - what to translate into (each gets an overlay), the
   spoken language, and names & slang:
   - **Spoken language** - Auto-detect (default), or English, Mandarin,
@@ -162,7 +183,8 @@ game to borderless.
   time), and the Discord plugin's connection, who's in the call, and its
   port.
 - **Models** - the speech model (switching takes a few seconds, during
-  which captions pause) and the translator's status.
+  which captions pause), the translator's status, and the local assistant
+  model for Explain and the side chat (on/off).
 
 ### Mixed languages and your own mic
 
@@ -226,6 +248,87 @@ Anything left out comes from the last run.
   else `large-v3`).
 - `--no-mic` - don't capture your microphone.
 - `--discord-bridge-port PORT` - the Discord plugin's port (default 8765).
+
+## Word lookup and saved words
+
+Any word in the captions - on an overlay (unlocked: Ctrl+Alt+L) or in the
+Transcript, in what was said or in a translation - can be looked up.
+Chinese, Simplified or Traditional:
+
+- **Hover** a character and the whole word it belongs to lights up, with a
+  popup of its pinyin and meaning. Lines are split into the longest words
+  the dictionary knows, so set phrases and chengyu (画蛇添足) come up whole,
+  marked "chengyu".
+- **Click** it to keep the lookup open: every reading and definition,
+  measure words, and the shorter words and single characters inside it -
+  click one to drill into it, and Back to return.
+- **Drag** from a word across a longer phrase - on an overlay, or select it
+  in the Transcript - to look the whole phrase up: its pinyin, its words
+  and characters, saving it, and Explain.
+- **Save** it into a category - Learning, Tricky and Know it to start with,
+  or your own (Vocabulary page), each with a colour you choose. From then
+  on, wherever the word turns up - an overlay, the Transcript - it's drawn
+  in that colour, in either script, and inside longer words too (游戏 in
+  打游戏). Saved words, with the sentence you saved them from, are kept in
+  `vocab.json`.
+- **Explain** (optional - [the local assistant](#the-local-assistant-optional)) -
+  what the word or phrase means in that sentence, how it's built, how it's
+  used, and the story behind a chengyu; it also points out when a "word" is
+  more likely a speech-recognition mistake. If the local assistant is off,
+  it switches it on (a few seconds to load) and back off when you close the
+  lookup - unless the side chat is open.
+
+The translations - English, or any other language - work the same way:
+hover, click or drag across a word or phrase. For English, the lookup lists
+**the Chinese for it**, from the dictionary's definitions (most-used words
+first) - click one to drill into it. **Find it in the Chinese** (the local
+assistant) picks out the words in the Chinese line that say it, and
+explains them: select "overdoing it" in "Doing it like this is overdoing
+it" and it finds 画蛇添足. Other languages have no dictionary, so just that.
+
+Pinyin and definitions come from [CC-CEDICT](https://cc-cedict.org/wiki/),
+the free community Chinese-English dictionary (~125,000 entries, CC BY-SA
+4.0, published by [MDBG](https://www.mdbg.net/chinese/dictionary?page=cc-cedict)) -
+downloaded by setup, or on first launch if it's missing, and loaded in
+the background in about a second, with word frequencies from
+[jieba](https://github.com/fxsjy/jieba)'s dictionary (MIT) to rank English
+lookups - CC-CEDICT has none. Pinyin is always the dictionary's, never
+the LLM's - it's asked not to write any, and the dictionary's is added after
+the Chinese words in its answers. CC-CEDICT has Mandarin readings only -
+Cantonese captions can be looked up too, but show Mandarin pinyin.
+
+## The local assistant (optional)
+
+Qwen3.5-4B, a small general-purpose LLM, running locally on its own
+llama.cpp server (the translator's, in `bin\`), behind two features:
+
+- **Explain** in a pinned word lookup (above) - which switches it on if
+  it's off, and back off when the lookup closes.
+- **The side chat** - the chat button in an unlocked overlay's header opens
+  it beside the overlay. Ask it anything - a word, how to say something,
+  what someone meant - with the conversation so far as context (the switch
+  under the messages; roughly the last 9,000 characters of captions), or
+  in one click: **Summarise** the conversation, **Explain the last line**
+  (the latest Chinese line someone said, broken down for a learner), or
+  **Help me reply** (three short replies in the conversation's language,
+  each with the dictionary's pinyin and its meaning). Drag its header to
+  move it and its corner to resize it - it's remembered. Opening it switches
+  the local assistant on (it loads in a few seconds); closing it - `x`, Esc
+  or the chat button again - switches it off and frees its VRAM.
+  Ctrl+Alt+H just hides it with the overlays, leaving the model on.
+
+It's a separate server from the translator's on purpose: that one handles
+one request at a time, so an explanation or a chat there would hold up live
+captions. Answers start streaming within about a second.
+
+Setup is opt-in - run `setup.bat -Assistant` to download the model (2.7GB),
+then open the side chat or click Explain in a lookup - or switch on
+**Local assistant** on the Models page to keep it on. It uses ~3GB of VRAM
+only while switched on: closing the side chat or the lookup that switched
+it on, or that switch, frees it. Its log goes to
+`logs/llama-server-assistant.log`. It's a 4B model: good at explaining
+words and lines, shakier on the details of a long conversation (who said
+what to whom) - treat it as a helpful guess, not gospel.
 
 ## Qwen3-ASR speech model (optional)
 

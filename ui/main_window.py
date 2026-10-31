@@ -1,24 +1,28 @@
 """
-The main window: a sidebar and six pages.
+The main window: a sidebar and seven pages.
 
   Home        - is it working, pause, the everyday toggles, where captions go
   Transcript  - this session's captions, every language side by side
+  Vocabulary  - your saved Chinese words and their colour categories
   Languages   - what to translate into, what's being spoken, names & slang
   Captions    - how the overlays look and when they update, with a preview
   Audio       - system audio, microphone, the Discord bridge
-  Models      - speech model choice, translator, GPU memory
+  Models      - speech model choice, translator, the local assistant, GPU memory
 
 Closing it keeps the app running in the tray; Quit (sidebar or tray) exits.
 """
 
 import html
 
-from PySide6.QtCore import QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, QPointF, QRect, Qt, QTimer
 from PySide6.QtGui import QColor, QPainter, QTextCursor
-from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit,
-                               QListWidget, QListWidgetItem, QMainWindow, QProgressBar, QPushButton, QScrollArea,
-                               QSlider, QSpinBox, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QComboBox, QFrame, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QProgressBar,
+                               QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QTextBrowser, QTextEdit,
+                               QVBoxLayout, QWidget)
 
+import assistant
+import dictionary
 import settings
 from captions import Caption
 from lang_codes import LANGUAGE_NAMES
@@ -26,6 +30,7 @@ from overlay_core import live_options, speech_context, speech_options
 from qwen_asr_client import MODEL_DIRS, PYTHON as QWEN_PYTHON
 from ui import theme
 from ui.app import gpu_memory
+from ui.lookup import HANZI_FAMILIES, Context, context_for
 from ui.overlay import CaptionBlock, spoken_languages_label
 from ui.widgets import (Card, Chip, FlowRow, Segmented, SettingRow, StatusDot, ToggleSwitch, app_icon, button, glyph,
                         label)
@@ -59,6 +64,8 @@ def _status_of(key, text):
         return theme.SUCCESS, text
     if text.startswith(("Loading", "Reloading")):
         return theme.WARNING, text.rstrip(".") + "..."
+    if key == "assistant" and text.startswith("Not installed"):
+        return theme.TEXT_FAINT, text  # optional - nothing's wrong
     if text.startswith(("Failed", "Not installed")) or "ERROR" in text:
         return theme.DANGER, text
     if text == "Off":
@@ -280,8 +287,10 @@ class TranscriptPage(QWidget):
         layout.setContentsMargins(36, 30, 36, 24)
         layout.setSpacing(14)
         layout.addWidget(label("Transcript", "PageTitle"))
-        layout.addWidget(label("Everything captioned this session, in every language. "
-                               "Saved to the logs folder as it happens.", "PageSubtitle", wrap=True))
+        layout.addWidget(label("Everything captioned this session, in every language. Saved to the logs "
+                               "folder as it happens. Hover any word to look it up - Chinese, or English for "
+                               "the Chinese for it - and click it, or select a phrase, to keep the lookup open.",
+                               "PageSubtitle", wrap=True))
         bar = QHBoxLayout()
         self.search = QLineEdit()
         self.search.setPlaceholderText("Search the transcript")
@@ -296,13 +305,17 @@ class TranscriptPage(QWidget):
         card.body.setContentsMargins(6, 6, 6, 6)
         self.view = QTextBrowser()
         self.view.setOpenLinks(False)
+        self.view.viewport().setMouseTracking(True)
+        self.view.viewport().installEventFilter(self)
         card.add(self.view)
         layout.addWidget(card, 1)
 
         self._rows = None  # what's shown: [(caption key, its html)]
         self._starts: "list[int]" = []  # where each shown caption starts in the document
+        self._hovered = None  # (start, end) in the document of the word under the mouse
         controller.board_changed.connect(self.render)
         controller.targets_changed.connect(lambda: self.render(force=True))
+        controller.vocab_changed.connect(self.render)  # saved words' colours - keeping your place
 
     def showEvent(self, event):  # noqa: N802
         self.render(force=True)
@@ -321,13 +334,142 @@ class TranscriptPage(QWidget):
         lines = [f'<span style="color:{theme.TEXT_FAINT}">{cap.time:%H:%M:%S}</span>&nbsp;&nbsp;'
                  f'<b style="color:{color}">{speaker}</b>&nbsp;&nbsp;'
                  f'<span style="color:{theme.TEXT_FAINT}">{html.escape(spoken_languages_label(cap))}</span>',
-                 f'<span style="color:{theme.TEXT}">{html.escape(cap.native)}</span>']
+                 f'<span style="color:{theme.TEXT}">{self._colored(cap.native)}</span>']
         for target in self.c.targets:
             text, is_translation = cap.translations.get(target, ("", False))
             if is_translation and text:
                 lines.append(f'<span style="color:{theme.TEXT_FAINT}">{html.escape(LANGUAGE_NAMES.get(target, target))}'
-                             f'</span>&nbsp;&nbsp;<span style="color:{theme.TEXT_DIM}">{html.escape(text)}</span>')
+                             f'</span>&nbsp;&nbsp;<span style="color:{theme.TEXT_DIM}">{self._colored(text)}</span>')
         return "<br>".join(lines) + "<br>"
+
+    def _colored(self, text):
+        """`text` as html, saved words in their category's colour."""
+        out, at = [], 0
+        for start, end, color in self.c.vocab.spans(text):
+            out.append(f'{html.escape(text[at:start])}'
+                       f'<span style="color:{color}">{html.escape(text[start:end])}</span>')
+            at = end
+        return "".join(out) + html.escape(text[at:])
+
+    # -- word lookup ------------------------------------------------------------------
+
+    def eventFilter(self, obj, event):  # noqa: N802
+        if obj is self.view.viewport():
+            kind = event.type()
+            if kind == QEvent.Type.MouseMove and not event.buttons():
+                self._hover(event.position())
+            elif kind == QEvent.Type.Leave:
+                self._set_hovered(None)
+                self.c.lookup.unhover()
+            elif kind == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+                self._click(event.position())
+        return super().eventFilter(obj, event)
+
+    def _line_at(self, position):
+        """(line text, where it starts in the document, caption) for the
+        transcript line at document `position` - past a translation's
+        "Language" label - or None (on a caption's time-and-speaker line)."""
+        doc = self.view.document()
+        block = doc.findBlock(position)
+        if not block.isValid() or not self._rows or block.blockNumber() >= len(self._rows):
+            return None
+        text, index = block.text(), position - block.position()
+        if " " not in text[:index]:
+            return None
+        start = text.rfind(" ", 0, index) + 1
+        end = text.find(" ", index)
+        line = text[start:end if end >= 0 else len(text)]
+        label_end = line.rfind("  ")   # "Chinese (Simplified)  我觉得..."
+        if label_end >= 0:
+            start, line = start + label_end + 2, line[label_end + 2:]
+        key = self._rows[block.blockNumber()][0]
+        caption = next((c for c in self.c.board.captions if c.key == key), None)
+        return (line, block.position() + start, caption) if caption else None
+
+    def _word_at(self, pos):
+        """(start, end) in the document of the word under `pos` (viewport
+        coordinates) - in any language - the word, its line and its caption,
+        or None."""
+        doc = self.view.document()
+        point = QPointF(pos.x() + self.view.horizontalScrollBar().value(),
+                        pos.y() + self.view.verticalScrollBar().value())
+        hit = doc.documentLayout().hitTest(point, Qt.HitTestAccuracy.ExactHit)
+        if hit < 0:
+            return None
+        cursor = QTextCursor(doc)
+        cursor.setPosition(hit)
+        if self.view.cursorRect(cursor).x() > pos.x():
+            hit -= 1  # hitTest gives the nearer edge - the character's on its left
+        found = self._line_at(hit)
+        if found is None:
+            return None
+        line, line_start, caption = found
+        span = dictionary.word_span_at(line, hit - line_start)
+        if span is None:
+            return None
+        return line_start + span[0], line_start + span[1], line[span[0]:span[1]], line, caption
+
+    def _anchor(self, start, end):
+        """The on-screen rect of document positions start-end (on one line)."""
+        doc = self.view.document()
+        rects = []
+        for position in (start, end):
+            cursor = QTextCursor(doc)
+            cursor.setPosition(position)
+            rects.append(self.view.cursorRect(cursor))
+        a, b = rects
+        right = b.left() if b.top() == a.top() else a.left() + 24  # wrapped - just its first part
+        rect = QRect(a.left(), a.top(), max(8, right - a.left()), a.height())
+        return QRect(self.view.viewport().mapToGlobal(rect.topLeft()), rect.size())
+
+    def _set_hovered(self, span):
+        if span == self._hovered:
+            return
+        self._hovered = span
+        selections = []
+        if span:
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = QTextCursor(self.view.document())
+            selection.cursor.setPosition(span[0])
+            selection.cursor.setPosition(span[1], QTextCursor.MoveMode.KeepAnchor)
+            selection.format.setBackground(QColor(255, 255, 255, 34))
+            selections.append(selection)
+        self.view.setExtraSelections(selections)
+
+    def _hover(self, pos):
+        found = self._word_at(pos)
+        if found is None:
+            self._set_hovered(None)
+            self.c.lookup.unhover()
+            return
+        start, end, word, line, caption = found
+        self._set_hovered((start, end))
+        self.c.lookup.hover(word, context_for(caption, line), self._anchor(start, end))
+
+    def _click(self, pos):
+        """A click on a word pins its lookup; a selected phrase is looked up
+        as a whole."""
+        cursor = self.view.textCursor()
+        if cursor.hasSelection():
+            start, end = cursor.selectionStart(), cursor.selectionEnd()
+            found = self._line_at(start)
+            if found is None or " " in cursor.selectedText():
+                return
+            line, line_start, caption = found
+            # English by the whole word, at either end - the selection widened to show it
+            a, b = dictionary.snap_to_words(line, max(0, start - line_start), min(end - line_start, len(line)))
+            start, end = line_start + a, line_start + b
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+            self.view.setTextCursor(cursor)
+            phrase = line[a:b].strip()
+            if any(ch.isalpha() for ch in phrase) and len(phrase) <= 80:
+                self.c.lookup.pin(phrase, context_for(caption, line), self._anchor(start, end))
+            return
+        found = self._word_at(pos)
+        if found is not None:
+            start, end, word, line, caption = found
+            self.c.lookup.pin(word, context_for(caption, line), self._anchor(start, end))
 
     def render(self, force=False):
         """Shows the finished captions. Live updates don't touch it; a new
@@ -344,6 +486,7 @@ class TranscriptPage(QWidget):
         bar = self.view.verticalScrollBar()
         at_bottom = bar.value() >= bar.maximum() - 4
         position = bar.value()
+        self._set_hovered(None)  # its document positions are about to change
         self.view.setUpdatesEnabled(False)
         try:
             doc = self.view.document()
@@ -380,6 +523,212 @@ class TranscriptPage(QWidget):
             lines += [f"    {LANGUAGE_NAMES.get(t, t)}: {text}" for t, (text, is_tr) in cap.translations.items()
                       if is_tr and text]
         QApplication.clipboard().setText("\n".join(lines))
+
+
+# =============================================================================
+# Vocabulary
+# =============================================================================
+
+MAX_WORD_ROWS = 300  # shown at once - search to find the rest
+
+
+class VocabularyPage(QWidget):
+    def __init__(self, controller):
+        super().__init__()
+        self.c = controller
+        page, content = _page("Vocabulary", "Chinese words you've saved from lookups. Wherever one turns up "
+                                            "again - on an overlay or in the transcript - it's drawn in its "
+                                            "category's colour.")
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(page)
+
+        lookup = Card("Look up a word", "Or hover a Chinese word on an overlay (unlock it first - Ctrl+Alt+L) or "
+                                        "in the transcript. Click it to keep the lookup open: the characters "
+                                        "inside, saving it, and Explain.")
+        row = QHBoxLayout()
+        self.lookup_field = QLineEdit()
+        self.lookup_field.setPlaceholderText("e.g. 画蛇添足, 电脑, 覺得")
+        self.lookup_field.returnPressed.connect(self._look_up)
+        row.addWidget(self.lookup_field, 1)
+        row.addWidget(button("Look up", "primary", self._look_up))
+        lookup.add(row)
+        content.addWidget(lookup)
+
+        categories = Card("Categories", "Each has its own colour - click a colour to change it. Yellow and "
+                                        "white are best avoided: on the overlays they mean a translation and "
+                                        "what was said.")
+        self.category_rows = QVBoxLayout()
+        self.category_rows.setSpacing(6)
+        categories.add(self.category_rows)
+        add_row = QHBoxLayout()
+        self.new_category = QLineEdit()
+        self.new_category.setPlaceholderText("New category")
+        self.new_category.returnPressed.connect(self._add_category)
+        self.new_category.setFixedWidth(220)
+        add_row.addWidget(self.new_category)
+        add_row.addWidget(button("Add", None, self._add_category))
+        add_row.addStretch(1)
+        categories.add(add_row)
+        content.addWidget(categories)
+
+        words = Card("Saved words")
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search your words - Chinese, pinyin or meaning")
+        self.search.setClearButtonEnabled(True)
+        self.search.textChanged.connect(lambda _: self._refresh_words())
+        words.add(self.search)
+        self.word_rows = QVBoxLayout()
+        self.word_rows.setSpacing(2)
+        words.add(self.word_rows)
+        content.addWidget(words)
+        content.addStretch(1)
+
+        self._dirty = True
+        controller.vocab_changed.connect(self._changed)
+
+    def showEvent(self, event):  # noqa: N802
+        if self._dirty:
+            self._refresh()
+
+    def _changed(self):
+        self._dirty = True
+        if self.isVisible():
+            self._refresh()
+
+    def _refresh(self):
+        self._dirty = False
+        self._refresh_categories()
+        self._refresh_words()
+
+    def _look_up(self):
+        text = self.lookup_field.text().strip()
+        if text:
+            field = self.lookup_field
+            anchor = QRect(field.mapToGlobal(field.rect().topLeft()), field.size())
+            self.c.lookup.pin(text, Context(text), anchor)
+
+    # -- categories ---------------------------------------------------------------------
+
+    def _refresh_categories(self):
+        _clear(self.category_rows)
+        vocab = self.c.vocab
+        for category in vocab.categories:
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            swatch = QPushButton()
+            swatch.setFixedSize(26, 26)
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setToolTip("Change colour")
+            swatch.setStyleSheet(f"QPushButton {{ background: {category['color']}; border: 2px solid "
+                                 f"{theme.BORDER}; border-radius: 13px; padding: 0; }}"
+                                 f"QPushButton:hover {{ border-color: {theme.TEXT_DIM}; }}")
+            swatch.clicked.connect(lambda _, c=category: self._pick_color(c))
+            row.addWidget(swatch)
+            name = QLineEdit(category["name"])
+            name.setFixedWidth(220)
+            name.editingFinished.connect(lambda c=category, field=name: self._rename(c, field.text()))
+            row.addWidget(name)
+            count = len(vocab.in_category(category["id"]))
+            row.addWidget(label(f"{count} word{'s' if count != 1 else ''}", "Dim"))
+            row.addStretch(1)
+            if len(vocab.categories) > 1:
+                row.addWidget(button("Delete", "ghost", lambda _, c=category: self._delete_category(c)))
+            self.category_rows.addLayout(row)
+
+    def _pick_color(self, category):
+        color = QColorDialog.getColor(QColor(category["color"]), self, f"Colour for {category['name']}")
+        if color.isValid():
+            self.c.vocab.update_category(category["id"], color=color.name())
+
+    def _rename(self, category, name):
+        name = name.strip()
+        if name and name != category["name"]:
+            self.c.vocab.update_category(category["id"], name=name)
+
+    def _add_category(self):
+        name = self.new_category.text().strip()
+        if name:
+            self.new_category.clear()
+            self.c.vocab.add_category(name)
+
+    def _delete_category(self, category):
+        count = len(self.c.vocab.in_category(category["id"]))
+        if count and QMessageBox.question(
+                self, "Delete category", f"Delete “{category['name']}” and the {count} word"
+                                         f"{'s' if count != 1 else ''} saved in it?") != QMessageBox.StandardButton.Yes:
+            return
+        self.c.vocab.remove_category(category["id"])
+
+    # -- words --------------------------------------------------------------------------
+
+    def _refresh_words(self):
+        _clear(self.word_rows)
+        vocab = self.c.vocab
+        query = self.search.text().strip().lower()
+        words = sorted(vocab.words.values(), key=lambda w: w.get("added", ""), reverse=True)
+        if query:
+            words = [w for w in words if query in w["simplified"] or query in w["traditional"]
+                     or query in w["pinyin"].lower() or query in w["meaning"].lower()]
+        if not words:
+            self.word_rows.addWidget(label("No matches." if query else "None yet - hover a Chinese word, click "
+                                           "it and pick a category to save it.", "Dim", wrap=True))
+            return
+        for record in words[:MAX_WORD_ROWS]:
+            self.word_rows.addWidget(self._word_row(record))
+        if len(words) > MAX_WORD_ROWS:
+            self.word_rows.addWidget(label(f"{len(words) - MAX_WORD_ROWS} more - search to find them.", "Faint"))
+
+    def _word_row(self, record):
+        vocab = self.c.vocab
+        category = vocab.category(record["category"])
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 2, 0, 2)
+        row.setSpacing(12)
+        word = record["simplified"]
+        hanzi = QPushButton(word if record["traditional"] == word else f"{word}  {record['traditional']}")
+        hanzi.setCursor(Qt.CursorShape.PointingHandCursor)
+        hanzi.setToolTip("Look it up")
+        hanzi.setStyleSheet(f"QPushButton {{ background: transparent; border: none; padding: 2px 4px; "
+                            f"color: {category['color'] if category else theme.TEXT}; "
+                            f"{theme.font_css(HANZI_FAMILIES['simplified'], 18, 500)} }}"
+                            f"QPushButton:hover {{ background: {theme.SURFACE_2}; border-radius: 6px; }}")
+        hanzi.clicked.connect(lambda: self.c.lookup.pin(
+            word, Context(record.get("sentence") or word), QRect(hanzi.mapToGlobal(hanzi.rect().topLeft()),
+                                                                 hanzi.size())))
+        row.addWidget(hanzi)
+        text = QVBoxLayout()
+        text.setSpacing(0)
+        pinyin = label(record["pinyin"])
+        pinyin.setStyleSheet(f"color: {theme.ACCENT};")
+        text.addWidget(pinyin)
+        text.addWidget(label(record["meaning"], "Dim", wrap=True))
+        if record.get("sentence") and record["sentence"] != word:
+            text.addWidget(label(f"Heard in: {record['sentence']}", "Faint", wrap=True))
+        row.addLayout(text, 1)
+        choice = QComboBox()
+        for c in vocab.categories:
+            choice.addItem(c["name"], c["id"])
+        choice.setCurrentIndex(max(0, choice.findData(record["category"])))
+        choice.setFixedWidth(130)
+        choice.activated.connect(lambda _: vocab.move(word, choice.currentData()))
+        row.addWidget(choice, 0, Qt.AlignmentFlag.AlignVCenter)
+        remove = button("✕", "ghost", lambda: vocab.remove(word))
+        remove.setToolTip("Remove from your words")
+        row.addWidget(remove, 0, Qt.AlignmentFlag.AlignVCenter)
+        return box
+
+
+def _clear(layout):
+    while layout.count():
+        item = layout.takeAt(0)
+        if item.widget():
+            item.widget().hide()  # now - it's only deleted once back in the event loop
+            item.widget().deleteLater()
+        elif item.layout():
+            _clear(item.layout())
+            item.layout().deleteLater()
 
 
 # =============================================================================
@@ -859,9 +1208,26 @@ class ModelsPage(QWidget):
         self.translator_line = _StatusLine("Status")
         translation.add(self.translator_line)
         content.addWidget(translation)
+
+        local = Card("Local assistant", f"{assistant.MODEL_NAME} by Qwen - a small general-purpose model. It "
+                                        "explains a looked-up Chinese word in the sentence it was heard in, and "
+                                        "answers in the side chat (the chat button on an overlay): questions about "
+                                        "the call, summaries, help replying.")
+        self.assistant_toggle = ToggleSwitch(controller.assistant_enabled)
+        self.assistant_toggle.setEnabled(assistant.installed())
+        self.assistant_toggle.toggled.connect(controller.set_assistant_enabled)
+        local.add(SettingRow("Local assistant on",
+                             "Uses ~3 GB of GPU memory while on. Opening the side chat switches it on, and "
+                             "closing it switches it off." if assistant.installed()
+                             else "Not installed - run setup.bat -Assistant (2.7 GB).",
+                             self.assistant_toggle))
+        self.assistant_line = _StatusLine("Status")
+        local.add(self.assistant_line)
+        content.addWidget(local)
         content.addStretch(1)
 
         controller.status_changed.connect(lambda _: self.refresh())
+        controller.prefs_changed.connect(self.refresh)
         self.refresh()
 
     def _choose(self, size):
@@ -879,6 +1245,9 @@ class ModelsPage(QWidget):
             opt.setEnabled(self.available[size] and not busy)
         self.model_line.set(*_status_of("whisper_model", model_status))
         self.translator_line.set(*_status_of("translator", self.c.status.get("translator")))
+        self.assistant_line.set(*_status_of("assistant", self.c.status.get("assistant")))
+        if self.assistant_toggle.isChecked() != self.c.assistant_enabled:
+            self.assistant_toggle.setChecked(self.c.assistant_enabled)
 
 
 # =============================================================================
@@ -888,6 +1257,7 @@ class ModelsPage(QWidget):
 NAV = [
     ("Home", ""),
     ("Transcript", ""),
+    ("Vocabulary", ""),
     ("Languages", ""),
     ("Captions", ""),
     ("Audio", ""),
@@ -934,6 +1304,7 @@ class MainWindow(QMainWindow):
         self.pages = {
             "Home": HomePage(controller, self.go_to),
             "Transcript": TranscriptPage(controller),
+            "Vocabulary": VocabularyPage(controller),
             "Languages": LanguagesPage(controller),
             "Captions": CaptionsPage(controller),
             "Audio": AudioPage(controller),

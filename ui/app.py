@@ -19,15 +19,17 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QRect, QTimer, S
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+import assistant
 import discord_bridge
 import overlay_core
 import settings
+import vocab
 from captions import CaptionBoard
 from lang_codes import LANGUAGE_NAMES
 from overlay_core import LOG_DIR, capture_options, live_options, speech_options
 from ui import theme
 from ui.overlay import CaptionOverlay, default_geometry
-from ui.widgets import app_icon
+from ui.widgets import app_icon, bring_to_front
 
 try:  # GPU memory readout - optional (nvidia-ml-py)
     import pynvml
@@ -53,7 +55,8 @@ class Controller(QObject):
     board_changed = Signal()
     targets_changed = Signal()
     state_changed = Signal()     # paused / locked / hidden / mic toggles
-    prefs_changed = Signal()     # overlay look, timing, speech options
+    prefs_changed = Signal()     # overlay look, timing, speech options, the assistant model on/off
+    vocab_changed = Signal()     # saved words or their categories
     notice = Signal(str)
 
     def __init__(self, targets, pipeline_factory, model_size, capture_mic, bridge_port):
@@ -71,6 +74,12 @@ class Controller(QObject):
         self.status = dict(overlay_core.status.values)
         self.overlays: "dict[str, CaptionOverlay]" = {}
         self.quitting = False
+        self.vocab = vocab.Vocab()
+        self.vocab.on_change = self._vocab_changed
+        self.assistant_enabled = saved["assistant"] and assistant.installed()
+        self.lookup = None    # the word lookup popup (ui/lookup.py), made once Qt's running
+        self.chat = None      # the assistant side chat (ui/assistant_chat.py), likewise
+        self._chat_was_open = False   # when the overlays were hidden, with them
 
         os.makedirs(LOG_DIR, exist_ok=True)
         self.log_path = os.path.join(LOG_DIR, f"Session_{datetime.now():%Y%m%d_%H%M%S}.log")
@@ -86,6 +95,15 @@ class Controller(QObject):
         self._poll = QTimer(self, interval=40, timeout=self._drain)
 
     def start(self):
+        from ui.assistant_chat import AssistantChat
+        from ui.lookup import LookupPopup
+        self.lookup = LookupPopup(self)
+        self.chat = AssistantChat(self)
+        if self.assistant_enabled:
+            assistant.start()
+        else:
+            overlay_core.status.set("assistant", "Off" if assistant.installed()
+                                    else "Not installed - run setup.bat -Assistant")
         for target in self.targets:
             self._open_overlay(target)
         self.pipeline.start()
@@ -192,16 +210,46 @@ class Controller(QObject):
 
     def set_locked(self, locked):
         self.locked = locked
+        if locked:
+            self.lookup.unhover()  # a click-through overlay gets no "mouse left" to hide it
         for overlay in self.overlays.values():
             overlay.set_locked(locked)
+        # re-shown overlays come up over a pinned lookup and the chat
+        self.lookup.bring_to_front()
+        bring_to_front(self.chat)
         settings.update(locked=locked)
         self.state_changed.emit()
 
     def set_overlays_hidden(self, hidden):
         self.overlays_hidden = hidden
+        if hidden:
+            self.lookup.unhover()
+            self._chat_was_open = self.chat.isVisible()
+            self.chat.hide()
         for overlay in self.overlays.values():
             overlay.setVisible(not hidden)
+        if not hidden and self._chat_was_open:
+            self.chat.show()
+        self.lookup.bring_to_front()
+        bring_to_front(self.chat)
         self.state_changed.emit()
+
+    def toggle_chat(self, overlay):
+        """The assistant side chat, opened beside `overlay` - switching the
+        local assistant on - or closed."""
+        if self.chat.isVisible():
+            self.close_chat()
+        else:
+            if not self.assistant_enabled and assistant.installed():
+                self.set_assistant_enabled(True)  # loads while the chat opens - a few seconds
+            self.chat.open_beside(overlay.frameGeometry())
+
+    def close_chat(self):
+        """Closes the side chat and switches the local assistant off, freeing
+        its VRAM. (Hidden with the overlays, or at quit, it stays on.)"""
+        self.chat.hide()
+        if self.assistant_enabled:
+            self.set_assistant_enabled(False)
 
     @property
     def paused(self):
@@ -277,6 +325,21 @@ class Controller(QObject):
         settings.update(translate_live=on)
         self.prefs_changed.emit()
 
+    def set_assistant_enabled(self, on):
+        """The local assistant model on (loads it - ~3GB of VRAM) or off (frees it)."""
+        self.assistant_enabled = on and assistant.installed()
+        settings.update(assistant=self.assistant_enabled)
+        if self.assistant_enabled:
+            assistant.start()
+        else:
+            assistant.stop()
+        self.prefs_changed.emit()
+
+    def _vocab_changed(self):
+        for overlay in self.overlays.values():
+            overlay.recolor()
+        self.vocab_changed.emit()
+
     def set_model(self, size):
         self.pipeline.model_holder.request_reload(size)
 
@@ -293,6 +356,9 @@ class Controller(QObject):
     def shutdown(self):
         self.quitting = True
         self._poll.stop()
+        self.lookup.close_lookup()
+        self.chat.hide()
+        assistant.stop()
         self.pipeline.shutdown()
         for overlay in self.overlays.values():
             overlay.close()

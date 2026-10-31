@@ -27,6 +27,7 @@ from collections import deque
 
 from opencc import OpenCC
 
+import dictionary
 import discord_bridge
 import settings
 import translator
@@ -364,6 +365,7 @@ def main():
 
     # Loads in the background; the main window's status tracks it.
     translator.start()
+    dictionary.start()  # the word lookup's - ~1s, also in the background
 
     from ui.app import run  # local import - Qt is only needed for the app itself
     run(

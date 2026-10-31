@@ -9,3 +9,6 @@ eval/results/
 venv-qwen-asr/
 settings.json
 settings.json.tmp
+data/
+vocab.json
+vocab.json.tmp

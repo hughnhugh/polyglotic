@@ -1,5 +1,8 @@
 """Small reusable widgets: cards, setting rows, a toggle switch, segmented
-choices, chips, status dots and the app icon."""
+choices, chips, status dots and the app icon - and bringing an always-on-top
+window to the front without activating it."""
+
+import ctypes
 
 from PySide6.QtCore import Property, QEasingCurve, QPropertyAnimation, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
@@ -7,6 +10,25 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QHBoxLayou
                                QSizePolicy, QVBoxLayout, QWidget)
 
 from ui import theme
+
+
+HWND_TOPMOST = -1
+SWP_NOSIZE, SWP_NOMOVE, SWP_NOACTIVATE = 0x0001, 0x0002, 0x0010
+
+_user32 = ctypes.WinDLL("user32")
+# Typed: untyped, ctypes passes window handles as 32-bit ints - HWND_TOPMOST (-1) included.
+_user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_uint]
+_user32.SetWindowPos.restype = ctypes.c_bool
+
+
+def bring_to_front(window):
+    """Puts an always-on-top window above the others - the overlays are too.
+    Showing a hidden window doesn't move it up, a clicked overlay comes up
+    over it, and Qt's raise_() would activate it, taking focus from the
+    game; this moves it without activating."""
+    if window.isVisible():
+        _user32.SetWindowPos(int(window.winId()), HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
 
 def label(text="", name=None, wrap=False, selectable=False):

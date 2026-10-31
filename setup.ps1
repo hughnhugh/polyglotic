@@ -12,9 +12,13 @@
     -QwenASR also sets up the optional Qwen3-ASR speech model (~9GB more):
     its own venv (venv-qwen-asr/ - its packages conflict with faster-whisper's)
     and both model sizes in models/.
+
+    -Assistant also downloads the optional local assistant model (Qwen3.5-4B,
+    2.7GB, into models/) - Explain in word lookups and the side chat, switched
+    on from the Models page.
 #>
 
-param([switch]$QwenASR)
+param([switch]$QwenASR, [switch]$Assistant)
 
 $ErrorActionPreference = "Stop"
 
@@ -165,6 +169,34 @@ if ((Test-Path $modelPath) -and (Get-Item $modelPath).Length -eq $modelSize) {
     Get-Download $modelUrl $modelPath $modelSize
 }
 
+# --- Word lookup: CC-CEDICT dictionary (+ optional local assistant) --------
+$cedictPath = "data\cedict.txt.gz"
+if (Test-Path $cedictPath) {
+    Write-Step "Reusing existing CC-CEDICT dictionary ($cedictPath)"
+} else {
+    Write-Step "Downloading the CC-CEDICT Chinese-English dictionary (4MB)"
+    New-Item -ItemType Directory -Force data | Out-Null
+    Get-Download "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" $cedictPath
+}
+# Word frequencies (jieba's dictionary, MIT) - rank English-to-Chinese lookups
+$frequencyPath = "data\word-frequency.txt"
+if (-not (Test-Path $frequencyPath)) {
+    Write-Step "Downloading Chinese word frequencies (5MB)"
+    Get-Download "https://raw.githubusercontent.com/fxsjy/jieba/master/jieba/dict.txt" $frequencyPath
+}
+
+if ($Assistant) {
+    $assistantPath = "models\Qwen3.5-4B-Q4_K_M.gguf"
+    $assistantSize = 2740937888
+    if ((Test-Path $assistantPath) -and (Get-Item $assistantPath).Length -eq $assistantSize) {
+        Write-Step "Reusing existing local assistant model ($assistantPath)"
+    } else {
+        Write-Step "Downloading the Qwen3.5-4B local assistant model (2.7GB - resumes if interrupted)"
+        New-Item -ItemType Directory -Force models | Out-Null
+        Get-Download "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf" $assistantPath $assistantSize
+    }
+}
+
 # --- Optional: Qwen3-ASR speech model ------------------------------------
 if ($QwenASR) {
     $qwenPython = ".\venv-qwen-asr\Scripts\python.exe"
@@ -213,6 +245,10 @@ Write-Host "  .\venv\Scripts\python.exe translate_vc.py"
 Write-Host ""
 if ($QwenASR) {
     Write-Host "Pick qwen3-asr-1.7b or qwen3-asr-0.6b under Speech model in Settings, or pass --model."
+    Write-Host ""
+}
+if ($Assistant) {
+    Write-Host "Switch on the local assistant on the Models page - for Explain in word lookups and the side chat."
     Write-Host ""
 }
 Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"
