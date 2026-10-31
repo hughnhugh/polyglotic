@@ -13,6 +13,7 @@ import ctypes.wintypes
 import os
 import queue
 import sys
+import threading
 from datetime import datetime
 
 from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QRect, QTimer, Signal
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 import discord_bridge
 import overlay_core
 import settings
+import translator
 from captions import CaptionBoard
 from lang_codes import LANGUAGE_NAMES
 from overlay_core import LOG_DIR, capture_options, live_options, speech_options
@@ -279,6 +281,14 @@ class Controller(QObject):
 
     def set_model(self, size):
         self.pipeline.model_holder.request_reload(size)
+
+    def set_translator(self, name):
+        """Restarts the translator with quantization `name` (translator.MODELS)
+        - in the background: the old server takes a moment to shut down."""
+        if name == translator.model and translator.running():
+            return
+        settings.update(translator=name)
+        threading.Thread(target=translator.switch, args=(name,), daemon=True, name="translator-switch").start()
 
     def set_bridge_port(self, port):
         self.pipeline.set_bridge_port(port)

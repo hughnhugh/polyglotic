@@ -162,7 +162,8 @@ game to borderless.
   time), and the Discord plugin's connection, who's in the call, and its
   port.
 - **Models** - the speech model (switching takes a few seconds, during
-  which captions pause) and the translator's status.
+  which captions pause), and the translator - its compression and status
+  (see [Translator quality](#translator-quality-optional)).
 
 ### Mixed languages and your own mic
 
@@ -226,6 +227,24 @@ Anything left out comes from the last run.
   else `large-v3`).
 - `--no-mic` - don't capture your microphone.
 - `--discord-bridge-port PORT` - the Discord plugin's port (default 8765).
+
+## Translator quality (optional)
+
+The translator, Hy-MT2-7B, comes compressed (quantized) to two sizes,
+picked from the dropdown on the Models page - switching takes a few
+seconds, during which translations pause:
+
+| | Download / VRAM | |
+|---|---|---|
+| `Q4_K_M` (default) | ~4.6GB | the most compressed - always installed |
+| `Q8_0` | ~8.0GB | the closest to uncompressed |
+
+`Q8_0` is opt-in: `setup.bat -Translator Q8_0`. If it isn't downloaded the
+dropdown says so, and the app falls back to `Q4_K_M` if it goes missing.
+Don't expect much from it: `Q6_K`, nearly as close to uncompressed, was
+compared with `Q4_K_M` on 640 real captions (`eval/compare_translators.py`)
+and translated no better - about half the lines came out word for word the
+same, and the rest split evenly.
 
 ## Qwen3-ASR speech model (optional)
 

@@ -363,7 +363,7 @@ def main():
     capture_options["caption_mic"] = saved["caption_mic"]
 
     # Loads in the background; the main window's status tracks it.
-    translator.start()
+    translator.start(saved["translator"])
 
     from ui.app import run  # local import - Qt is only needed for the app itself
     run(

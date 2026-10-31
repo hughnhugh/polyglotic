@@ -12,9 +12,12 @@
     -QwenASR also sets up the optional Qwen3-ASR speech model (~9GB more):
     its own venv (venv-qwen-asr/ - its packages conflict with faster-whisper's)
     and both model sizes in models/.
+
+    -Translator Q8_0 also downloads a less compressed translator (8.0GB),
+    the closest to the uncompressed model - picked on the Models page.
 #>
 
-param([switch]$QwenASR)
+param([switch]$QwenASR, [string[]]$Translator = @())
 
 $ErrorActionPreference = "Stop"
 
@@ -165,6 +168,25 @@ if ((Test-Path $modelPath) -and (Get-Item $modelPath).Length -eq $modelSize) {
     Get-Download $modelUrl $modelPath $modelSize
 }
 
+# Optional less compressed translator (-Translator Q8_0)
+$translatorFiles = @{
+    "Q8_0" = @("HY-MT2-7B-Q8_0.gguf", 7981928896)
+}
+foreach ($quant in ($Translator -join "," -split "," | Where-Object { $_ })) {
+    if (-not $translatorFiles.ContainsKey($quant)) {
+        Write-Warn "Unknown translator '$quant' - the only one offered is Q8_0."
+        continue
+    }
+    $file, $size = $translatorFiles[$quant]
+    $path = "models\$file"
+    if ((Test-Path $path) -and (Get-Item $path).Length -eq $size) {
+        Write-Step "Reusing existing $quant translator ($path)"
+    } else {
+        Write-Step "Downloading the Hy-MT2-7B $quant translator ($([math]::Round($size / 1e9, 1))GB - resumes if interrupted)"
+        Get-Download "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/main/$file" $path $size
+    }
+}
+
 # --- Optional: Qwen3-ASR speech model ------------------------------------
 if ($QwenASR) {
     $qwenPython = ".\venv-qwen-asr\Scripts\python.exe"
@@ -213,6 +235,10 @@ Write-Host "  .\venv\Scripts\python.exe translate_vc.py"
 Write-Host ""
 if ($QwenASR) {
     Write-Host "Pick qwen3-asr-1.7b or qwen3-asr-0.6b under Speech model in Settings, or pass --model."
+    Write-Host ""
+}
+if ($Translator) {
+    Write-Host "Pick the translator on the main window's Models page."
     Write-Host ""
 }
 Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"

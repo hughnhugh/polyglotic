@@ -6,7 +6,7 @@ The main window: a sidebar and six pages.
   Languages   - what to translate into, what's being spoken, names & slang
   Captions    - how the overlays look and when they update, with a preview
   Audio       - system audio, microphone, the Discord bridge
-  Models      - speech model choice, translator, GPU memory
+  Models      - speech model and translator choice, GPU memory
 
 Closing it keeps the app running in the tray; Quit (sidebar or tray) exits.
 """
@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QFrame, QH
                                QSlider, QSpinBox, QStackedWidget, QTextBrowser, QVBoxLayout, QWidget)
 
 import settings
+import translator
 from captions import Caption
 from lang_codes import LANGUAGE_NAMES
 from overlay_core import live_options, speech_context, speech_options
@@ -40,6 +41,12 @@ MODEL_CHOICES = [
     ("large-v3", "Whisper large-v3", "OpenAI's model. Weaker on Cantonese, and invents text on noise more often.",
      "4 GB"),
     ("small", "Whisper small", "Lightest option, noticeably less accurate.", "1 GB"),
+]
+
+# The translator's quantizations (translator.MODELS): (name, label, what it's for)
+TRANSLATOR_CHOICES = [
+    ("Q4_K_M", "Hy-MT2-7B Q4_K_M (default)", "The most compressed - the least GPU memory."),
+    ("Q8_0", "Hy-MT2-7B Q8_0", "The closest to the uncompressed model, for about 3.4 GB more than Q4_K_M."),
 ]
 
 FADE_CHOICES = [(None, "Never"), (5, "5s"), (8, "8s"), (15, "15s"), (30, "30s")]
@@ -856,6 +863,21 @@ class ModelsPage(QWidget):
 
         translation = Card("Translation", "Hy-MT2-7B by Tencent - a translation model tuned for casual speech. "
                                           "Translates into every chosen language.")
+        self.translator_choice = QComboBox()
+        self.translator_choice.setMinimumWidth(280)
+        for name, title, note in TRANSLATOR_CHOICES:
+            available = translator.installed(name)
+            size = translator.MODELS[name][1] / 1e9
+            self.translator_choice.addItem(f"{title}  ·  {size:.1f} GB" + ("" if available else "  ·  not downloaded"),
+                                           name)
+            item = self.translator_choice.model().item(self.translator_choice.count() - 1)
+            item.setEnabled(available)
+            item.setToolTip(note if available else f"Run setup.bat -Translator {name} to download it ({size:.1f} GB).")
+        self.translator_choice.activated.connect(
+            lambda _: controller.set_translator(self.translator_choice.currentData()))
+        translation.add(SettingRow("Model", "The same translator, less compressed: larger is a little more "
+                                   "accurate with nuance and slang, and takes more GPU memory. Switching takes a few "
+                                   "seconds, during which translations pause.", self.translator_choice))
         self.translator_line = _StatusLine("Status")
         translation.add(self.translator_line)
         content.addWidget(translation)
@@ -878,7 +900,12 @@ class ModelsPage(QWidget):
         for size, opt in self.options.items():
             opt.setEnabled(self.available[size] and not busy)
         self.model_line.set(*_status_of("whisper_model", model_status))
-        self.translator_line.set(*_status_of("translator", self.c.status.get("translator")))
+        translator_status = str(self.c.status.get("translator", ""))
+        self.translator_line.set(*_status_of("translator", translator_status))
+        self.translator_choice.setEnabled(not translator_status.startswith("Loading"))
+        index = self.translator_choice.findData(translator.model)
+        if index >= 0 and index != self.translator_choice.currentIndex():
+            self.translator_choice.setCurrentIndex(index)
 
 
 # =============================================================================
