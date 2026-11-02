@@ -183,8 +183,9 @@ game to borderless.
   time), and the Discord plugin's connection, who's in the call, and its
   port.
 - **Models** - the speech model (switching takes a few seconds, during
-  which captions pause), the translator's status, and the local assistant
-  model for Explain and the side chat (on/off).
+  which captions pause), the translator - its compression and status (see
+  [Translator quality](#translator-quality-optional)) - and the local
+  assistant model for Explain and the side chat (on/off).
 
 ### Mixed languages and your own mic
 
@@ -329,6 +330,24 @@ it on, or that switch, frees it. Its log goes to
 `logs/llama-server-assistant.log`. It's a 4B model: good at explaining
 words and lines, shakier on the details of a long conversation (who said
 what to whom) - treat it as a helpful guess, not gospel.
+
+## Translator quality (optional)
+
+The translator, Hy-MT2-7B, comes compressed (quantized) to two sizes,
+picked from the dropdown on the Models page - switching takes a few
+seconds, during which translations pause:
+
+| | Download / VRAM | |
+|---|---|---|
+| `Q4_K_M` (default) | ~4.6GB | the most compressed - always installed |
+| `Q8_0` | ~8.0GB | the closest to uncompressed |
+
+`Q8_0` is opt-in: `setup.bat -Translator Q8_0`. If it isn't downloaded the
+dropdown says so, and the app falls back to `Q4_K_M` if it goes missing.
+Don't expect much from it: `Q6_K`, nearly as close to uncompressed, was
+compared with `Q4_K_M` on 640 real captions (`eval/compare_translators.py`)
+and translated no better - about half the lines came out word for word the
+same, and the rest split evenly.
 
 ## Qwen3-ASR speech model (optional)
 

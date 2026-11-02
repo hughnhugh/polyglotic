@@ -51,6 +51,7 @@ PORT = 8091
 
 MODELS = {
     "hymt2-7b": dict(repo="tencent/Hy-MT2-7B-GGUF", file="Hy-MT2-7B-Q4_K_M.gguf", family="hymt"),
+    "hymt2-7b-q8": dict(repo="tencent/Hy-MT2-7B-GGUF", file="HY-MT2-7B-Q8_0.gguf", family="hymt"),
     "hymt2-1.8b": dict(repo="tencent/Hy-MT2-1.8B-GGUF", file="Hy-MT2-1.8B-Q8_0.gguf", family="hymt"),
     "translategemma-4b": dict(repo="bullerwins/translategemma-4b-it-GGUF", file="translategemma-4b-it-Q8_0.gguf",
                               family="translategemma"),
@@ -60,7 +61,7 @@ VARIANTS = ["plain", "casual", "casual+ctx"]
 
 # Which targets each source language gets translated into - the app's
 # common pairs (Chinese/Cantonese, Vietnamese, English).
-DIRECTIONS = {"en": ["zh", "vi", "yue"], "zh": ["en", "vi"], "vi": ["en", "zh"]}
+DIRECTIONS = {"en": ["zh", "vi", "yue"], "zh": ["en", "vi"], "vi": ["en", "zh"], "yue": ["en"]}
 
 LANG_EN = {"en": "English", "zh": "Simplified Chinese", "vi": "Vietnamese", "yue": "Cantonese"}
 LANG_ZH = {"en": "英语", "zh": "简体中文", "vi": "越南语", "yue": "粤语"}
@@ -83,6 +84,10 @@ _CANTONESE_MARKERS = set("係嘅唔咗哋喺冇啲嚟咁噉乜嘢佢睇揾搵畀
 
 _LINE_RE = re.compile(r"^\[(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\] (.*?)\[([a-z]{2,3}), [\d.]+s\] (.*)$")
 _FILE_RE = re.compile(r"Live_Captions__(.+)_\d{8}_\d{6}\.log$")
+# Session_*.log (the current app): "(final g5) (proc 1.1s) (live x3)" before the text, and every
+# target's translation on its own "    -> [zh] ..." line.
+_NOTES_RE = re.compile(r"^(?:\([^)]*\)\s*)+")
+_TARGETED_RE = re.compile(r"^    -> \[([\w-]+)\] (.*)$")
 
 
 def load_segments():
@@ -100,11 +105,16 @@ def load_segments():
             if not lm:
                 continue
             ts, speaker, lang, native = lm.groups()
-            translated = None
-            if i + 1 < len(lines) and lines[i + 1].startswith("    -> "):
-                translated = lines[i + 1][len("    -> "):].strip()
-            raw.append((datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"), speaker.strip(), lang, native.strip(),
-                        target, translated))
+            native = _NOTES_RE.sub("", native)
+            shown = []  # (target, translation) the app showed
+            j = i + 1
+            while j < len(lines) and lines[j].startswith("    -> "):
+                tm = _TARGETED_RE.match(lines[j])
+                shown.append((tm.group(1), tm.group(2).strip()) if tm else (target, lines[j][len("    -> "):].strip()))
+                j += 1
+            for shown_target, translated in shown or [(target, None)]:
+                raw.append((datetime.strptime(ts, "%Y-%m-%d %H:%M:%S"), speaker.strip(), lang, native.strip(),
+                            shown_target, translated))
 
     raw.sort(key=lambda r: r[0])
     segments = []
@@ -137,7 +147,7 @@ def context_for(segments, seg):
 
 
 def _is_short(seg):
-    if seg["lang"] == "zh":
+    if seg["lang"] in ("zh", "yue"):
         return len(seg["native"]) <= 10
     return len(seg["native"].split()) <= 6
 

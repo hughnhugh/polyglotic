@@ -1,8 +1,8 @@
 """
 Settings remembered between launches, in settings.json next to the app, so
 a plain launch comes back the way it was last left: target languages,
-speech model, mic capture, the Discord bridge port, the speech model's
-conversation language and context words, live caption timing, the
+speech model, translator, mic capture, the Discord bridge port, the speech
+model's conversation language and context words, live caption timing, the
 subtitle overlays' look, positions and lock, and the local assistant model
 (on/off, and its side chat's place). Command-line options still override
 them for that run. (Saved words are in vocab.json - see vocab.py.)
@@ -39,6 +39,7 @@ DEFAULTS = {
     "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
+    "translator": "Q4_K_M", # the translator's quantization - a key of translator.MODELS
     "assistant": False,     # the local assistant model running (assistant.py): Explain, side chat - ~3GB VRAM
     "chat_context": True,   # the side chat gives the model the conversation so far
     "chat_geometry": None,  # the side chat's [x, y, width, height], once opened

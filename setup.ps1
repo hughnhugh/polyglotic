@@ -16,9 +16,12 @@
     -Assistant also downloads the optional local assistant model (Qwen3.5-4B,
     2.7GB, into models/) - Explain in word lookups and the side chat, switched
     on from the Models page.
+
+    -Translator Q8_0 also downloads a less compressed translator (8.0GB),
+    the closest to the uncompressed model - picked on the Models page.
 #>
 
-param([switch]$QwenASR, [switch]$Assistant)
+param([switch]$QwenASR, [switch]$Assistant, [string[]]$Translator = @())
 
 $ErrorActionPreference = "Stop"
 
@@ -169,6 +172,25 @@ if ((Test-Path $modelPath) -and (Get-Item $modelPath).Length -eq $modelSize) {
     Get-Download $modelUrl $modelPath $modelSize
 }
 
+# Optional less compressed translator (-Translator Q8_0)
+$translatorFiles = @{
+    "Q8_0" = @("HY-MT2-7B-Q8_0.gguf", 7981928896)
+}
+foreach ($quant in ($Translator -join "," -split "," | Where-Object { $_ })) {
+    if (-not $translatorFiles.ContainsKey($quant)) {
+        Write-Warn "Unknown translator '$quant' - the only one offered is Q8_0."
+        continue
+    }
+    $file, $size = $translatorFiles[$quant]
+    $path = "models\$file"
+    if ((Test-Path $path) -and (Get-Item $path).Length -eq $size) {
+        Write-Step "Reusing existing $quant translator ($path)"
+    } else {
+        Write-Step "Downloading the Hy-MT2-7B $quant translator ($([math]::Round($size / 1e9, 1))GB - resumes if interrupted)"
+        Get-Download "https://huggingface.co/tencent/Hy-MT2-7B-GGUF/resolve/main/$file" $path $size
+    }
+}
+
 # --- Word lookup: CC-CEDICT dictionary (+ optional local assistant) --------
 $cedictPath = "data\cedict.txt.gz"
 if (Test-Path $cedictPath) {
@@ -249,6 +271,10 @@ if ($QwenASR) {
 }
 if ($Assistant) {
     Write-Host "Switch on the local assistant on the Models page - for Explain in word lookups and the side chat."
+    Write-Host ""
+}
+if ($Translator) {
+    Write-Host "Pick the translator on the main window's Models page."
     Write-Host ""
 }
 Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"
