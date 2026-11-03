@@ -31,6 +31,7 @@ from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QScrollA
 
 import assistant
 import dictionary
+import vi_dictionary
 from ui import theme
 from ui.widgets import bring_to_front
 
@@ -126,9 +127,16 @@ class _PartRow(QFrame):
         row.setContentsMargins(10, 5, 10, 5)
         row.setSpacing(10)
         hanzi = QLabel(part)
-        hanzi.setStyleSheet(_hanzi_css(17, part, entries) + " background: transparent;")
+        if dictionary.has_han(part):
+            hanzi.setStyleSheet(_hanzi_css(17, part, entries) + " background: transparent;")
+        else:  # a Vietnamese word in a phrase
+            hanzi.setStyleSheet(theme.font_css(theme.UI_FAMILIES, 15, 500) + " background: transparent;")
         row.addWidget(hanzi, 0, Qt.AlignmentFlag.AlignTop)
-        if entries:
+        vietnamese = [] if dictionary.has_han(part) else vi_dictionary.lookup(part)
+        if vietnamese:
+            readings = vietnamese[0].pos
+            meaning = "; ".join(vietnamese[0].senses[:2])
+        elif entries:
             readings = " / ".join(dict.fromkeys(e.pinyin for e in entries[:3]))
             meaning = "; ".join(_definitions(entries[0])[0][:2])
         else:
@@ -329,7 +337,16 @@ class LookupPopup(QWidget):
             self.content.addLayout(top)
 
         if not dictionary.has_han(word):
-            self._fill_other(word)
+            # Vietnamese: in a Vietnamese line, a word the dictionary has or
+            # that's plainly Vietnamese ("okay" said mid-line goes on to
+            # the English side)
+            vietnamese = vi_dictionary.lookup(word)
+            saved = self.c.vocab.get(word)
+            if (saved or {}).get("language") == "vi" or vi_dictionary.is_vietnamese(self.context.sentence or word) and (
+                    vietnamese or vi_dictionary.is_vietnamese(word) or not vi_dictionary.ready()):
+                self._fill_vietnamese(word, vietnamese)
+            else:
+                self._fill_other(word)
             return
         self.content.addLayout(self._headline(word, entries))
 
@@ -366,6 +383,97 @@ class LookupPopup(QWidget):
                 self.content.addWidget(_section("Inside this word" if entries else "Words and characters"))
                 for part in parts:
                     self.content.addWidget(_PartRow(part, self._drill))
+
+    def _fill_vietnamese(self, word, entries):
+        """A Vietnamese word (vi_dictionary): each part of speech it's used
+        as and its senses - each with where it's said and how it comes
+        across (Southern, slang...) - its Hán-Nôm characters and
+        classifiers, and for a Sino-Vietnamese word the Chinese it comes
+        from, with its pinyin, a click away from its own lookup. Saved in
+        a category like a Chinese word."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        headline = QLabel(word)
+        headline.setWordWrap(True)
+        headline.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        headline.setStyleSheet(theme.font_css(theme.UI_FAMILIES, 22, 500))
+        row.addWidget(headline, 0, Qt.AlignmentFlag.AlignVCenter)
+        saved = self.c.vocab.get(word)
+        category = self.c.vocab.category(saved["category"]) if saved else None
+        if category:  # beside the word, as on a Chinese one
+            row.addWidget(_badge(category["name"], category["color"]), 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addStretch(1)
+        self.content.addLayout(row)
+        # What kind of word, on a line of their own - a Vietnamese word is wide enough already
+        badges = [("Vietnamese", theme.ACCENT)]
+        if any(e.chinese for e in entries):
+            badges.append(("Sino-Vietnamese", theme.WARNING))
+        idiom = next((e.idiom for e in entries if e.idiom), "")
+        if idiom:
+            badges.append((idiom, theme.SUCCESS))
+        kinds = QHBoxLayout()
+        kinds.setSpacing(6)
+        for text, color in badges:
+            kinds.addWidget(_badge(text, color))
+        kinds.addStretch(1)
+        self.content.addLayout(kinds)
+        if not vi_dictionary.ready():
+            self.content.addWidget(_text(vi_dictionary.failed() and
+                                         f"Vietnamese dictionary unavailable - {vi_dictionary.failed()}"
+                                         or "Loading the Vietnamese dictionary...", theme.TEXT_DIM))
+        parts = vi_dictionary.words_in(word) if vi_dictionary.ready() else []
+        if vi_dictionary.ready() and not entries:
+            # A phrase the dictionary hasn't got as a whole: what its words mean
+            known = [p for p in parts if vi_dictionary.lookup(p)]
+            if len(parts) > 1 and known:
+                self.content.addWidget(_text("Not in the dictionary as a whole" + ("" if self.pinned else " - its words:"),
+                                             theme.TEXT_DIM))
+                if not self.pinned:  # pinned, they're listed under "Words in this phrase"
+                    self.content.addWidget(_text("  ·  ".join(f"{p} - {vi_dictionary.lookup(p)[0].senses[0]}"
+                                                             for p in known), theme.TEXT))
+            else:
+                self.content.addWidget(_text("Not in the Vietnamese dictionary", theme.TEXT_DIM))
+        limit = PINNED_READINGS if self.pinned else HOVER_READINGS
+        for entry in entries[:limit]:
+            box = QVBoxLayout()
+            box.setSpacing(2)
+            box.addWidget(_text(entry.pos, theme.ACCENT, 12))
+            count = len(entry.senses) if self.pinned else HOVER_DEFINITIONS
+            for sense, labels in list(zip(entry.senses, entry.sense_labels or ((),) * len(entry.senses)))[:count]:
+                line = QHBoxLayout()
+                line.setSpacing(6)
+                for label in labels:
+                    line.addWidget(_badge(label, _sense_label_color(label)), 0, Qt.AlignmentFlag.AlignTop)
+                line.addWidget(_text(sense, theme.TEXT), 1)
+                box.addLayout(line)
+            extra = ([f"Hán Nôm {' '.join(entry.hanzi)}"] if entry.hanzi else []) + \
+                    ([f"Classifiers: {', '.join(entry.classifiers)}"] if entry.classifiers else [])
+            if extra:
+                box.addWidget(_text("  ·  ".join(extra), theme.TEXT_DIM, 12))
+            self.content.addLayout(box)
+        if len(entries) > limit:
+            self.content.addWidget(_text(f"+{len(entries) - limit} more - click to see them all"
+                                         if not self.pinned else f"+{len(entries) - limit} more", theme.TEXT_FAINT, 12))
+        chinese = next((e.chinese for e in entries if e.chinese), "")
+        if chinese:
+            found = dictionary.lookup(chinese)
+            gloss = "; ".join(_definitions(found[0])[0][:2]) if found else ""
+            self.content.addWidget(_text(f"From Chinese {chinese}" + (f"  {found[0].pinyin}" if found else "")
+                                         + (f" - {gloss}" if gloss else ""), theme.TEXT_DIM))
+        if not self.pinned:
+            self.content.addWidget(_text("Click to save it" + (" or see the Chinese it comes from" if chinese else ""),
+                                         theme.TEXT_FAINT, 12))
+            return
+        self._save_row(word, entries, language="vi")
+        if len(parts) > 1:
+            self.content.addSpacing(4)
+            self.content.addWidget(_section("Inside this word" if entries else "Words in this phrase"))
+            for part in parts:
+                self.content.addWidget(_PartRow(part, self._drill))
+        if chinese:
+            self.content.addSpacing(4)
+            self.content.addWidget(_section("From Chinese"))
+            self.content.addWidget(_PartRow(chinese, self._drill))
 
     def _fill_other(self, word):
         """A word or phrase not in Chinese - a translation's, usually: the
@@ -432,7 +540,7 @@ class LookupPopup(QWidget):
             box.addWidget(_text("Measure word: " + ", ".join(measures), theme.TEXT_FAINT, 12))
         self.content.addLayout(box)
 
-    def _save_row(self, word, entries):
+    def _save_row(self, word, entries, language="zh"):
         saved = self.c.vocab.get(word)
         self.content.addSpacing(2)
         self.content.addWidget(_section("Save to"))
@@ -449,15 +557,24 @@ class LookupPopup(QWidget):
                                padding: 4px 11px; font-weight: {600 if current else 500}; }}
                 QPushButton:hover {{ background: {theme.rgba(color, 0.28)}; }}""")
             btn.setToolTip(f"Saved in {category['name']}" if current else f"Save to {category['name']}")
-            btn.clicked.connect(lambda _, cid=category["id"]: self._save(word, entries, cid))
+            btn.clicked.connect(lambda _, cid=category["id"]: self._save(word, entries, cid, language))
             row.addWidget(btn)
         row.addStretch(1)
         if saved is not None:
             row.addWidget(self._small_button("Remove", lambda: self.c.vocab.remove(word), "Remove from your words"))
         self.content.addWidget(_wrap(row))
 
-    def _save(self, word, entries, category_id):
+    def _save(self, word, entries, category_id, language="zh"):
         entry = entries[0] if entries else None
+        if language == "vi":  # vi_dictionary entries: as written, its first senses, the Chinese it comes from
+            if entry:
+                meaning = "; ".join(entry.senses[:2])
+            else:  # a compound it hasn't got: what its words mean
+                meaning = "  ·  ".join(f"{p}: {vi_dictionary.lookup(p)[0].senses[0]}"
+                                       for p in vi_dictionary.words_in(word) if vi_dictionary.lookup(p))
+            self.c.vocab.save(word, word, "", meaning, category_id, self.context.sentence, language="vi",
+                              origin=next((e.chinese for e in entries if e.chinese), ""))
+            return
         self.c.vocab.save(entry.simplified if entry else word, entry.traditional if entry else word,
                           entry.pinyin if entry else dictionary.pinyin_of(word), meaning_of(word), category_id,
                           self.context.sentence)
@@ -545,7 +662,10 @@ class LookupPopup(QWidget):
 
     def _fit(self):
         """Sizes the popup to its content (scrolling past the cap) and
-        places it by the word: below it, or above if there's no room."""
+        places it by the word: above it - over lines already read, not the
+        translation under it or what comes next - or below if there's no
+        room above. Growing (Explain streaming in), it grows upward, away
+        from the word."""
         width = WIDTH - 2
         self.body.setFixedWidth(width)
         wanted = self.content.totalHeightForWidth(width)
@@ -557,11 +677,11 @@ class LookupPopup(QWidget):
         screen = QGuiApplication.screenAt(self._anchor.center()) or QGuiApplication.primaryScreen()
         area = screen.availableGeometry()
         x = min(max(self._anchor.left() - 14, area.left() + 8), area.right() - self.width() - 8)
-        below = self._anchor.bottom() + 10
-        if below + self.height() <= area.bottom() - 8:
-            y = below
+        above = self._anchor.top() - 10 - self.height()
+        if above >= area.top() + 8:
+            y = above
         else:
-            y = max(area.top() + 8, self._anchor.top() - 10 - self.height())
+            y = min(self._anchor.bottom() + 10, area.bottom() - 8 - self.height())
         self.move(x, y)
 
     def paintEvent(self, event):  # noqa: N802
@@ -593,6 +713,16 @@ def _section(title):
     lbl = QLabel(title.upper())
     lbl.setObjectName("SectionLabel")
     return lbl
+
+
+def _sense_label_color(label):
+    """A Vietnamese sense label's badge colour: where it's said, the accent;
+    offensive, red; the rest - register - quiet."""
+    if label in ("Southern", "Northern", "Central"):
+        return theme.ACCENT
+    if label in ("derogatory", "vulgar"):
+        return theme.DANGER
+    return theme.TEXT_DIM
 
 
 def _badge(text, color):

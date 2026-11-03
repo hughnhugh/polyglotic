@@ -20,6 +20,7 @@ from PySide6.QtCore import QAbstractNativeEventFilter, QObject, QRect, QTimer, S
 from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
+import aligner
 import assistant
 import discord_bridge
 import overlay_core
@@ -28,7 +29,7 @@ import translator
 import vocab
 from captions import CaptionBoard
 from lang_codes import LANGUAGE_NAMES
-from overlay_core import LOG_DIR, capture_options, live_options, speech_options
+from overlay_core import LOG_DIR, capture_options, link_options, live_options, speech_options
 from ui import theme
 from ui.overlay import CaptionOverlay, default_geometry
 from ui.widgets import app_icon, bring_to_front
@@ -79,6 +80,7 @@ class Controller(QObject):
         self.vocab = vocab.Vocab()
         self.vocab.on_change = self._vocab_changed
         self.assistant_enabled = saved["assistant"] and assistant.installed()
+        self._word_links_changed(self.prefs.get("word_links", "off"))
         self.lookup = None    # the word lookup popup (ui/lookup.py), made once Qt's running
         self.chat = None      # the assistant side chat (ui/assistant_chat.py), likewise
         self._chat_was_open = False   # when the overlays were hidden, with them
@@ -305,9 +307,21 @@ class Controller(QObject):
 
     # -- preferences -------------------------------------------------------------------
 
+    def _word_links_changed(self, mode):
+        """Word links on: the pipeline links each caption's words, and the
+        alignment model loads (in the background). Off: it's let go of,
+        freeing its memory."""
+        link_options["enabled"] = mode != "off" and aligner.installed()
+        if link_options["enabled"]:
+            aligner.start()
+        else:
+            aligner.stop()
+
     def set_pref(self, key, value):
         self.prefs[key] = value
         self.prefs_version += 1
+        if key == "word_links":
+            self._word_links_changed(value)
         settings.update(overlay=dict(self.prefs))
         for overlay in self.overlays.values():
             overlay.refresh()

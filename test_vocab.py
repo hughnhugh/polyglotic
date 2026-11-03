@@ -52,6 +52,28 @@ def main():
     assert reloaded.words == v.words and reloaded.categories == v.categories
     assert reloaded.spans("我们踢足球") == [(3, 5, "#123456")]
     print("OK: kept across a reload")
+    import vi_dictionary
+    vi_path = os.path.join(tempfile.mkdtemp(), "vocab.json")
+    w = vocab.Vocab(vi_path)
+    w.save("học sinh", "học sinh", "", "a student", "learning", "Em là học sinh.", language="vi", origin="學生")
+    w.save("bạn", "bạn", "", "friend", "tricky", language="vi")
+    w.save("to", "to", "", "big", "known", language="vi")
+    w.save("电脑", "電腦", "diàn nǎo", "computer", "learning")
+    line = "Học sinh và bạn ở nhà to, có bàn và 电脑."
+    found = {line[a:b]: color for a, b, color in w.spans(line)}
+    assert found == {"Học sinh": "#6fc3ff", "bạn": "#ff7a9a", "to": "#8be38f", "电脑": "#6fc3ff"}, found
+    assert w.spans("I want to go to school.") == [], "a saved Vietnamese 'to' isn't coloured in English"
+    assert w.get("HỌC SINH")["origin"] == "學生" and w.get("học sinh")["language"] == "vi"
+    nfd = vi_dictionary.unicodedata.normalize("NFD", "học sinh")
+    assert w.get(nfd) is not None, "any accent encoding"
+    across = "Em học, sinh viên."  # punctuation between - not the saved word
+    assert all(across[a:b] != "học, sinh" for a, b, _ in w.spans(across + " bạn"))
+    w.remove("Bạn")
+    assert w.get("bạn") is None
+    again = vocab.Vocab(vi_path)
+    assert again.get("học sinh")["origin"] == "學生" and again.get("电脑")["pinyin"] == "diàn nǎo"
+    print("OK: Vietnamese words saved - whole syllables, any case or accent encoding, only in Vietnamese lines, "
+          "beside Chinese; removed; kept across a reload")
     print("ALL OK")
 
 

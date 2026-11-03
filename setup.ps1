@@ -19,9 +19,13 @@
 
     -Translator Q8_0 also downloads a less compressed translator (8.0GB),
     the closest to the uncompressed model - picked on the Models page.
+
+    -WordLinks also sets up word links (which words of a caption and its
+    translation mean the same - Captions page): the transformers package
+    and the awesome-align word-alignment model (1.1GB, into models/).
 #>
 
-param([switch]$QwenASR, [switch]$Assistant, [string[]]$Translator = @())
+param([switch]$QwenASR, [switch]$Assistant, [switch]$WordLinks, [string[]]$Translator = @())
 
 $ErrorActionPreference = "Stop"
 
@@ -200,6 +204,15 @@ if (Test-Path $cedictPath) {
     New-Item -ItemType Directory -Force data | Out-Null
     Get-Download "https://www.mdbg.net/chinese/export/cedict/cedict_1_0_ts_utf-8_mdbg.txt.gz" $cedictPath
 }
+# Vietnamese dictionary (Wiktionary's Vietnamese entries, CC BY-SA, as kaikki.org exports them) - Vietnamese lookups
+$viDictPath = "data\vi-wiktionary.jsonl.gz"
+if (Test-Path $viDictPath) {
+    Write-Step "Reusing existing Vietnamese dictionary ($viDictPath)"
+} else {
+    Write-Step "Downloading the Vietnamese dictionary (13MB)"
+    New-Item -ItemType Directory -Force data | Out-Null
+    Get-Download "https://kaikki.org/dictionary/Vietnamese/kaikki.org-dictionary-Vietnamese.jsonl.gz" $viDictPath
+}
 # Word frequencies (jieba's dictionary, MIT) - rank English-to-Chinese lookups
 $frequencyPath = "data\word-frequency.txt"
 if (-not (Test-Path $frequencyPath)) {
@@ -216,6 +229,24 @@ if ($Assistant) {
         Write-Step "Downloading the Qwen3.5-4B local assistant model (2.7GB - resumes if interrupted)"
         New-Item -ItemType Directory -Force models | Out-Null
         Get-Download "https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf" $assistantPath $assistantSize
+    }
+}
+
+if ($WordLinks) {
+    Write-Step "Installing transformers (for the word-alignment model)"
+    & $venvPython -m pip install transformers
+    if ($LASTEXITCODE -ne 0) {
+        Exit-WithError "Failed to install transformers."
+    }
+    $alignDir = "models\awesome-align-with-co"
+    if (Test-Path "$alignDir\pytorch_model.bin") {
+        Write-Step "Reusing existing word-alignment model ($alignDir)"
+    } else {
+        Write-Step "Downloading the awesome-align word-alignment model (1.1GB)"
+        & $venvPython -c "from huggingface_hub import snapshot_download; snapshot_download('aneuraz/awesome-align-with-co', local_dir=r'$alignDir', allow_patterns=['config.json', 'vocab.txt', 'tokenizer_config.json', 'special_tokens_map.json', 'pytorch_model.bin'])"
+        if ($LASTEXITCODE -ne 0) {
+            Exit-WithError "Failed to download the word-alignment model."
+        }
     }
 }
 
@@ -275,6 +306,10 @@ if ($Assistant) {
 }
 if ($Translator) {
     Write-Host "Pick the translator on the main window's Models page."
+    Write-Host ""
+}
+if ($WordLinks) {
+    Write-Host "Switch on word links on the Captions page."
     Write-Host ""
 }
 Write-Host "First launch downloads the Whisper and VAD models (~3GB) -"

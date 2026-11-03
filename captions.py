@@ -46,6 +46,9 @@ class Caption:
     # The same, a clause at a time - the rows it's shown in (see clauses.py):
     # ((native, translations), ...), joining up into native and translations
     clauses: tuple = ()
+    # Per clause, {language: [((start, end) in the clause, (start, end) in its translation into that
+    # language)]} - the words that say the same thing (see aligner.py), for the overlays' word links
+    clause_links: tuple = ()
     updated_at: float = field(default_factory=time.time)
     time: datetime = field(default_factory=datetime.now)
 
@@ -176,6 +179,7 @@ class CaptionBoard:
             lang=record.get("lang", ""), native=record["native"], translations=dict(record.get("translations", {})),
             group=record.get("group"), live=live, langs=tuple(record.get("langs") or ()),
             clauses=tuple((c["native"], dict(c["translations"])) for c in _clauses_of(record)),
+            clause_links=tuple(dict(c.get("links") or {}) for c in _clauses_of(record)),
             delay=(time.time() - speech_end) if speech_end is not None else None, proc=record.get("proc"),
         )
 

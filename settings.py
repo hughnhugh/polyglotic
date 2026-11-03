@@ -56,6 +56,8 @@ DEFAULTS = {
         "show_speakers": True,
         "show_language": True,  # the spoken language beside the speaker's name
         "fade_after": 8,        # seconds of silence before captions fade out; None = never
+        "word_links": "off",    # off / hover / colours / arrows - linked words underlined alike (see docs/word-links.md)
+        "link_detail": "most",  # key (content words only) / most (pronouns, 是, 这个... too)
     },
     "overlay_geometry": {},     # target -> [x, y, width, height], once moved/resized
     "locked": False,            # overlays click-through

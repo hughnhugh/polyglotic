@@ -46,8 +46,8 @@ and (optionally) have a small local LLM explain it in context. See
 folder. It finds your Python install, creates the project's virtual
 environment (`venv\`), installs everything, and downloads the translator - a
 prebuilt llama.cpp server into `bin\` and the Hy-MT2-7B model (4.6GB) into
-`models\` - and the CC-CEDICT dictionary and word frequencies for word lookups
-(9MB, into `data\`),
+`models\` - and the CC-CEDICT and Vietnamese dictionaries and word frequencies
+for word lookups (22MB, into `data\`),
 printing clear errors if something's missing (e.g. no Python
 found, or no NVIDIA GPU detected). Safe to re-run any time - it reuses an
 existing `venv\` and existing downloads rather than redoing them, so
@@ -180,7 +180,7 @@ game to borderless.
     ("嗯，我觉得…") is kept whole.
 - **Captions** - how the overlays look and behave, with a live preview:
   text size, background opacity, speaker names, the white line above
-  translations, how soon they fade, and live
+  translations, word links (below), how soon they fade, and live
   update timing (below). Also resets overlay positions.
 - **Audio** - which output device system audio is captured from and which
   microphone: Windows' default - followed when you change it in Windows'
@@ -305,6 +305,31 @@ assistant) picks out the words in the Chinese line that say it, and
 explains them: select "overdoing it" in "Doing it like this is overdoing
 it" and it finds 画蛇添足. Other languages have no dictionary, so just that.
 
+**Vietnamese** has its own dictionary. Hover a syllable in a Vietnamese line
+and the whole word it's part of lights up - Vietnamese words can run over
+several syllables, so "sinh" in "học sinh" looks up "học sinh" (student) -
+with its part of speech and meanings, its Hán-Nôm characters (học - 學),
+classifiers for a noun (bánh mì: chiếc, ổ, cái) and, for a Sino-Vietnamese
+word, the Chinese it comes from with its pinyin (học sinh - 學生 xuéshēng):
+click the lookup open, then the Chinese, for its own lookup. Badges say what
+kind of word it is - **Sino-Vietnamese**, **idiom**, **proverb** - and, by
+each meaning, where it's said and how it comes across (**Southern**,
+**Northern**, **slang**, **literary**, **dated**, **derogatory**...). Click
+it open to **save** it into a category, as with a Chinese word: from then
+on it's drawn in that colour wherever it turns up in a Vietnamese line -
+whole syllables, any capitalisation ("học sinh", "Học sinh") - and it's on
+the Vocabulary page with its meaning and the Chinese it comes from.
+Compounds the dictionary hasn't got as one word - "đi học" (go to school),
+"bánh mì thịt" - work too: drag across one to look it up and its card lists
+the words it's made of with their meanings, each a click from its own
+lookup. Save it and it keeps those meanings, is coloured as a whole, and
+hovering any syllable of it picks up the whole compound. A line counts
+as Vietnamese when it has a letter only Vietnamese uses (ơ, ư, đ, ạ...) -
+which nearly every line does. The entries are English Wiktionary's
+Vietnamese ones (~36,000 words, CC BY-SA), as [kaikki.org](https://kaikki.org/dictionary/Vietnamese/)
+exports them - downloaded by setup, or on first launch if it's missing,
+and cut down once to a 1MB file that loads in a fraction of a second.
+
 Pinyin and definitions come from [CC-CEDICT](https://cc-cedict.org/wiki/),
 the free community Chinese-English dictionary (~125,000 entries, CC BY-SA
 4.0, published by [MDBG](https://www.mdbg.net/chinese/dictionary?page=cc-cedict)) -
@@ -315,6 +340,35 @@ lookups - CC-CEDICT has none. Pinyin is always the dictionary's, never
 the LLM's - it's asked not to write any, and the dictionary's is added after
 the Chinese words in its answers. CC-CEDICT has Mandarin readings only -
 Cantonese captions can be looked up too, but show Mandarin pinyin.
+
+## Word links (optional)
+
+Which words of what was said and its translation mean the same - 火锅 and
+"hot pot" - so you can learn from a line as it goes by, without hovering
+each word. **Word links** on the Captions page:
+
+- **On hover** - point at a word (overlay unlocked) and it and its
+  counterpart in the other line light up in the same colour.
+- **Colours** - linked words share an underline colour, always; the layout
+  doesn't change.
+- **Arrows** - the underlines plus a curve from each word to its
+  counterpart, across a gap inside each pair - captions get taller.
+
+**Link detail** sets how many: **Key words** links content words only;
+**Most words** (the default) adds pronouns, 是, 在, 有, 这个 and the like -
+他们 and "they". Every link the model finds is shown, each pair's in up to
+10 colours. Particles and articles (的, 了, 啊, "the") are never linked. Only lines that have
+settled get links - not the one still being spoken - and curves only
+join the two lines that face each other. It needs what was said shown
+above the translation.
+
+The links come from awesome-align, a multilingual BERT model fine-tuned to
+align words between a sentence and its translation (Chinese-English among
+the pairs it was built for). It runs on the CPU, about 30ms a line, so it
+needs no GPU memory, and loads in a few seconds the first time word links
+are switched on. Setup is opt-in: `setup.bat -WordLinks` installs the
+`transformers` package and downloads the model (1.1GB, into `models\`).
+Design notes and how it was evaluated: `docs/word-links.md`.
 
 ## The local assistant (optional)
 
@@ -503,3 +557,58 @@ captions:
   installed (see Setup above).
   A failed switch to Qwen3-ASR reverts to the previous model - its server
   log is `logs/qwen-asr-server.log`.
+
+### Cycle 3 - 2026-11-03: wired in
+
+Feedback on the wireframe (https://claude.ai/artifact/QwKAZeHn8SqaSP6rcMxjyi
+- a mock of the overlay with the four modes, a palette switch and an arrow
+gap slider): "looks good". Kept the palette and the 18px gap.
+
+**Built:**
+- The pipeline links each clause's words to each of its translations
+  (`translate_vc.link_clause`, cached by clause and translation) while word
+  links are on and the model's loaded - every clause, a live caption's
+  last too: once its section is done it isn't last any more, but its text
+  stays (the first version skipped it, and the last clause of each earlier
+  section went without links until the pause). The overlay leaves out
+  links on the clause still being spoken.
+- The model loads in the background, on the CPU, when word links are
+  switched on (`aligner.start`); until then captions just have none.
+- **On hover:** pointing at a word tints it and its counterpart in the
+  other line of the pair (`CaptionCanvas._link_partners`); nothing drawn
+  until then - the overlay is pixel for pixel the same as off.
+- A word said twice for the same thing (佛印 ... 佛印 - "Foyin") shares one
+  link - one colour, a curve from each.
+- **Word links** on the Captions page (greyed out, with how to get it, when
+  the model isn't installed); `setup.bat -WordLinks`.
+
+**To watch live:** CPU time - ~30ms a clause, each live update aligning its
+changed clauses; whether links on long monologues feel helpful or busy.
+
+### Cycle 4 - 2026-11-03: link detail
+
+**Question from the first live run:** what's stopping it matching more
+words? On the 160 clause pairs, the model aligned 80% of Chinese words but
+only 46% were shown - mostly the app's own filters, not the model:
+
+| of 1,284 Chinese words | |
+|---|---|
+| aligned by the model | 1,021 (80%) |
+| dropped by the Chinese grammar list (你, 他, 是, 说, 这个, 然后...) | 352 |
+| dropped - English side on the English grammar list ("you", "have", "this") | 59 |
+| over the 6-a-line cap | 31 |
+| never aligned (的, 了, 啊; paraphrase with no counterpart) | 263 |
+
+The grammar lists were broader than needed - the Chinese one took out
+pronouns and verbs, and the English one was the dictionary search's stop
+list. Only particles, fillers and articles: 63% shown at 6 a line, 70% at
+10 - and the links it adds are right (你 - "you", 他们 - "they", 是 -
+"is", 在 - "in", 有 - "have", 然后 - "then"). The rest, past ~80%, is the
+model's both-ways rule; loosening that would mostly add wrong links.
+
+**Built:** a setting, **Link detail: Key words / Most words** (default most,
+on the Captions page). `aligner.links()` now leaves out only particles,
+fillers and articles (`_GRAMMAR_HAN`, `_GRAMMAR_EN`) and marks each link
+`key` - not pronouns, 是, 这个... (`_MINOR_HAN`, `_MINOR_EN`) - and the
+overlay picks by level: key words 6 a line, most words 10, arrows 6
+(`MAX_LINKS`, `MAX_ARROWS`). Switching levels needs no re-alignment.

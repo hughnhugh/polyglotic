@@ -257,12 +257,16 @@ _WORD = re.compile(r"[^\W\d_]+(?:['’-][^\W\d_]+)*")   # a word in a spaced lan
 
 def word_span_at(text, index):
     """(start, end) of the word at `index` in any language: a dictionary
-    word for Chinese (word_at), a run of letters for the rest - None on a
-    space, digit or punctuation."""
+    word for Chinese (word_at) - and for Vietnamese, which can run over
+    several syllables ("học sinh" - see vi_dictionary) - a run of letters
+    for the rest. None on a space, digit or punctuation."""
     if not 0 <= index < len(text):
         return None
     if is_han(text[index]):
         return word_at(text, index)
+    import vi_dictionary
+    if vi_dictionary.ready() and vi_dictionary.is_vietnamese(text):
+        return vi_dictionary.word_span_at(text, index)
     for match in _WORD.finditer(text):
         if match.start() <= index < match.end():
             return None if any(is_han(c) for c in match.group()) else match.span()

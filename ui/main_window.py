@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QColorDialog, QComboB
                                QPushButton, QScrollArea, QSlider, QSpinBox, QStackedWidget, QTextBrowser, QTextEdit,
                                QVBoxLayout, QWidget)
 
+import aligner
 import assistant
 import dictionary
 import settings
@@ -56,6 +57,8 @@ TRANSLATOR_CHOICES = [
 
 FADE_CHOICES = [(None, "Never"), (5, "5s"), (8, "8s"), (15, "15s"), (30, "30s")]
 LIVE_CHOICES = [None, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6]
+WORD_LINK_CHOICES = [("off", "Off"), ("hover", "On hover"), ("colours", "Colours"), ("arrows", "Arrows")]
+LINK_DETAIL_CHOICES = [("key", "Key words"), ("most", "Most words")]
 
 
 def _status_of(key, text):
@@ -71,7 +74,7 @@ def _status_of(key, text):
         return theme.SUCCESS, text
     if text.startswith(("Loading", "Reloading")):
         return theme.WARNING, text.rstrip(".") + "..."
-    if key == "assistant" and text.startswith("Not installed"):
+    if key in ("assistant", "aligner") and text.startswith("Not installed"):
         return theme.TEXT_FAINT, text  # optional - nothing's wrong
     if text.startswith(("Failed", "Not installed")) or "ERROR" in text:
         return theme.DANGER, text
@@ -194,8 +197,9 @@ class HomePage(QWidget):
         # -- status ----------------------------------------------------------------------
         health = Card("Status")
         self.lines = {key: _StatusLine(name) for key, name in [
-            ("whisper_model", "Speech model"), ("translator", "Translator"), ("loopback", "System audio"),
-            ("mic", "Microphone"), ("discord_bridge", "Discord")]}
+            ("whisper_model", "Speech model"), ("translator", "Translator"), ("assistant", "Assistant"),
+            ("aligner", "Word alignment"), ("loopback", "System audio"), ("mic", "Microphone"),
+            ("discord_bridge", "Discord")]}
         for line in self.lines.values():
             health.add(line)
         gpu_row = QHBoxLayout()
@@ -543,16 +547,16 @@ class VocabularyPage(QWidget):
     def __init__(self, controller):
         super().__init__()
         self.c = controller
-        page, content = _page("Vocabulary", "Chinese words you've saved from lookups. Wherever one turns up "
-                                            "again - on an overlay or in the transcript - it's drawn in its "
-                                            "category's colour.")
+        page, content = _page("Vocabulary", "Chinese and Vietnamese words you've saved from lookups. Wherever "
+                                            "one turns up again - on an overlay or in the transcript - it's drawn "
+                                            "in its category's colour.")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
 
-        lookup = Card("Look up a word", "Or hover a Chinese word on an overlay (unlock it first - Ctrl+Alt+L) or "
-                                        "in the transcript. Click it to keep the lookup open: the characters "
-                                        "inside, saving it, and Explain.")
+        lookup = Card("Look up a word", "Or hover a Chinese or Vietnamese word on an overlay (unlock it first - "
+                                        "Ctrl+Alt+L) or in the transcript. Click it to keep the lookup open: the "
+                                        "characters inside, saving it, and Explain.")
         row = QHBoxLayout()
         self.lookup_field = QLineEdit()
         self.lookup_field.setPlaceholderText("e.g. 画蛇添足, 电脑, 覺得")
@@ -678,7 +682,8 @@ class VocabularyPage(QWidget):
             words = [w for w in words if query in w["simplified"] or query in w["traditional"]
                      or query in w["pinyin"].lower() or query in w["meaning"].lower()]
         if not words:
-            self.word_rows.addWidget(label("No matches." if query else "None yet - hover a Chinese word, click "
+            self.word_rows.addWidget(label("No matches." if query else "None yet - hover a Chinese or Vietnamese "
+                                           "word, click "
                                            "it and pick a category to save it.", "Dim", wrap=True))
             return
         for record in words[:MAX_WORD_ROWS]:
@@ -694,12 +699,14 @@ class VocabularyPage(QWidget):
         row.setContentsMargins(0, 2, 0, 2)
         row.setSpacing(12)
         word = record["simplified"]
+        vietnamese = record.get("language") == "vi"
         hanzi = QPushButton(word if record["traditional"] == word else f"{word}  {record['traditional']}")
         hanzi.setCursor(Qt.CursorShape.PointingHandCursor)
         hanzi.setToolTip("Look it up")
+        font = theme.UI_FAMILIES if vietnamese else HANZI_FAMILIES['simplified']
         hanzi.setStyleSheet(f"QPushButton {{ background: transparent; border: none; padding: 2px 4px; "
                             f"color: {category['color'] if category else theme.TEXT}; "
-                            f"{theme.font_css(HANZI_FAMILIES['simplified'], 18, 500)} }}"
+                            f"{theme.font_css(font, 18, 500)} }}"
                             f"QPushButton:hover {{ background: {theme.SURFACE_2}; border-radius: 6px; }}")
         hanzi.clicked.connect(lambda: self.c.lookup.pin(
             word, Context(record.get("sentence") or word), QRect(hanzi.mapToGlobal(hanzi.rect().topLeft()),
@@ -707,7 +714,13 @@ class VocabularyPage(QWidget):
         row.addWidget(hanzi)
         text = QVBoxLayout()
         text.setSpacing(0)
-        pinyin = label(record["pinyin"])
+        reading = record["pinyin"]
+        if vietnamese:  # no pinyin - the language, and the Chinese it comes from, if it does
+            origin = record.get("origin", "")
+            found = dictionary.lookup(origin) if origin else []
+            reading = "Vietnamese" + (f"  ·  from Chinese {origin}" if origin else "") + \
+                      (f" {found[0].pinyin}" if found else "")
+        pinyin = label(reading)
         pinyin.setStyleSheet(f"color: {theme.ACCENT};")
         text.addWidget(pinyin)
         text.addWidget(label(record["meaning"], "Dim", wrap=True))
@@ -981,6 +994,19 @@ class CaptionsPage(QWidget):
         self.original.toggled.connect(lambda on: controller.set_pref("show_original", on))
         look.add(SettingRow("What was said, above the translation", "White is what was said, in its own "
                             "language; yellow is always a translation. Off: just the yellow line.", self.original))
+        self.word_links = Segmented(WORD_LINK_CHOICES, prefs.get("word_links", "off"))
+        self.word_links.changed.connect(lambda v: controller.set_pref("word_links", v))
+        self.word_links_row = SettingRow("Word links", "Which words of what was said and its translation mean "
+                                         "the same. On hover: point at a word (overlay unlocked). Colours: they "
+                                         "share an underline colour. Arrows: curves join them - each caption gets "
+                                         "taller. Needs what was said shown.", self.word_links)
+        look.add(self.word_links_row)
+        self.link_detail = Segmented(LINK_DETAIL_CHOICES, prefs.get("link_detail", "most"))
+        self.link_detail.changed.connect(lambda v: controller.set_pref("link_detail", v))
+        look.add(SettingRow("Link detail", "Key words: content words only. Most words: pronouns, 是, 在, 这个 "
+                            "and the like too.", self.link_detail))
+        self.word_links_status = label("", "Faint", wrap=True)
+        look.add(self.word_links_status)
         content.addWidget(look)
 
         timing = Card("Timing")
@@ -1015,11 +1041,31 @@ class CaptionsPage(QWidget):
         content.addStretch(1)
 
         controller.prefs_changed.connect(self._sync)
+        QTimer(self, interval=1000, timeout=self._sync_word_links).start()
+        self._sync_word_links()
 
     def _sync(self):
         self.preview.refresh()
         if self.original.isChecked() != self.c.prefs["show_original"]:
             self.original.setChecked(self.c.prefs["show_original"])
+        self._sync_word_links()
+
+    def _sync_word_links(self):
+        on = self.c.prefs.get("word_links", "off") != "off"
+        self.word_links.setEnabled(aligner.installed())
+        self.link_detail.setEnabled(aligner.installed() and on)
+        if not aligner.installed():
+            text = "Needs the word-alignment model: run setup.bat -WordLinks (a 1.1 GB download)."
+        elif aligner.error:
+            text = f"The word-alignment model didn't load: {aligner.error}"
+        elif on and aligner.loading():
+            text = "Loading the word-alignment model - a few seconds..."
+        elif on and not self.c.prefs["show_original"]:
+            text = "Switch on what was said, above the translation, to see word links."
+        else:
+            text = ""
+        self.word_links_status.setText(text)
+        self.word_links_status.setVisible(bool(text))
 
     @staticmethod
     def _slider(lo, hi, value, suffix, on_change):
@@ -1272,6 +1318,16 @@ class ModelsPage(QWidget):
         self.assistant_line = _StatusLine("Status")
         local.add(self.assistant_line)
         content.addWidget(local)
+
+        links = Card("Word alignment", "awesome-align (Dou & Neubig) - a multilingual BERT model fine-tuned to "
+                                       "match the words of a sentence to its translation's, 火锅 to \u201chot "
+                                       "pot\u201d. Behind word links: switch them on from the Captions page.")
+        links.add(label("Runs on the CPU - no GPU memory - and holds ~1.2 GB of memory while word links are "
+                        "on." if aligner.installed() else
+                        "Not installed - run setup.bat -WordLinks (1.1 GB).", "Dim", wrap=True))
+        self.aligner_line = _StatusLine("Status")
+        links.add(self.aligner_line)
+        content.addWidget(links)
         content.addStretch(1)
 
         controller.status_changed.connect(lambda _: self.refresh())
@@ -1299,6 +1355,7 @@ class ModelsPage(QWidget):
         if index >= 0 and index != self.translator_choice.currentIndex():
             self.translator_choice.setCurrentIndex(index)
         self.assistant_line.set(*_status_of("assistant", self.c.status.get("assistant")))
+        self.aligner_line.set(*_status_of("aligner", self.c.status.get("aligner")))
         if self.assistant_toggle.isChecked() != self.c.assistant_enabled:
             self.assistant_toggle.setChecked(self.c.assistant_enabled)
 

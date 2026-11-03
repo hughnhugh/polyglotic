@@ -95,6 +95,10 @@ speech_options = {"language": None, "context": "", "auto_names": True,
 # updates are translated too or show the original text until the pause.
 # Set live from Settings.
 live_options = {"interval": 1.5, "translate": True}
+# Word links (docs/word-links.md): whether captions get their clauses' words
+# linked to their translations' (aligner.py) - on while an overlay shows
+# them (the word_links overlay setting isn't off). Set from the UI.
+link_options = {"enabled": False}
 
 
 # At most this many channel names go into the speech model's context. A
@@ -607,6 +611,8 @@ STATUS_FIELDS = [
     ("loopback", "System audio"),
     ("mic", "Microphone"),
     ("discord_bridge", "Discord bridge"),
+    ("assistant", "Local assistant"),
+    ("aligner", "Word alignment"),
 ]
 
 

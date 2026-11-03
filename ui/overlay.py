@@ -24,8 +24,8 @@ import time
 import unicodedata
 
 from PySide6.QtCore import QPoint, QPointF, QRect, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
-                           QTextLayout, QTextLine, QTextOption)
+from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPainter, QPainterPath, QPainterPathStroker,
+                           QPen, QPixmap, QTextLayout, QTextLine, QTextOption)
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
 
 import dictionary
@@ -42,31 +42,76 @@ HISTORY = 150             # captions an overlay keeps to scroll back through
 BASE_TEXT_PX = 21
 BASE_SPEAKER_PX = 13
 TRANSLATION_COLOR = "#ffd76e"   # classic subtitle yellow
+# Word links (docs/word-links.md): a clause's words and the words of its
+# translation that say the same thing, underlined in the same colour -
+# and, as arrows, joined by a curve. Not text colour: white/yellow and
+# saved words' colours already mean something.
+LINK_COLORS = ["#ff9f43", "#b388ff", "#4dd0e1", "#ff6e9c", "#a5d66f",   # orange, violet, cyan, pink, green
+               "#5c9dff", "#ff5252", "#3ddc97", "#e040fb", "#c8925a"]   # blue, red, mint, magenta, copper -
+# - 10, so a pair's links rarely share one (they cycle past that); neighbours far apart in hue
+# At most this many links per said/translated pair - the surest kept, see
+# caption_lines - or None for all of them: for now, to see everything the
+# model links. (Was 6 for key words and arrows, 10 for most words - but a
+# cap kept the first in the line, so a plain teach - 教 could be crowded out.)
+MAX_LINKS = None
+ARROW_GAP = 18            # px between a clause and its translation, for the links to cross
+ARROW_CLAUSE_GAP = 28     # px between pairs then - clearly more, so each pair still reads as one
 _SELECTION_COLOR = QColor(124, 156, 255, 105)   # a phrase being dragged across - theme.ACCENT, see-through
 
 
 def caption_lines(caption, target, second, prefs):
-    """[(text, colour, language, starts a clause)] for a caption in
+    """[(text, colour, language, starts a clause, links)] for a caption in
     `target`'s overlay - a clause at a time (see clauses.py), so a long
     caption reads line by line and a clause whose words didn't change
     keeps its rows as they were: what was said (white) - left out if the
     overlay hides originals and there's a translation - then its
     translation (yellow), into the target or, for a clause already in it,
     into the overlay's second language. A live caption's last line trails
-    off."""
+    off. links: ((start, end, link number), ...) - the row's words linked
+    to words of the other row of its pair (prefs["word_links"]), on
+    clauses that have settled: not a live caption's last, whose words -
+    and links - are still changing."""
     white = QColor("white")
     if caption.live:
         white.setAlphaF(0.85)
+    linking = prefs.get("word_links", "off") in ("hover", "colours", "arrows") and prefs["show_original"]
+    detail = prefs.get("link_detail", "most")
+    cap = MAX_LINKS
+    clauses = caption.clauses or ((caption.native, None),)
     lines = []
-    for (native, _), (said, translation, in_target) in zip(caption.clauses or ((caption.native, None),),
-                                                            caption.clause_lines(target, second)):
+    for n, ((native, _), (said, translation, in_target)) in enumerate(zip(clauses, caption.clause_lines(target,
+                                                                                                         second))):
+        said_links = translated_links = ()
+        settled = not (caption.live and n == len(clauses) - 1)
+        if linking and translation is not None and settled and n < len(caption.clause_links) \
+                and len(said) == len(native):  # a script conversion keeps the positions
+            # One link - one colour - per counterpart: a word said twice
+            # for the same thing (佛印 ... 佛印 - "Foyin") shares it. With
+            # more than `cap`, the surest stay - key words first - so a
+            # plain match like teach - 教 isn't crowded out by "some" - 一下
+            # for coming later in the line; then they're numbered (coloured)
+            # in reading order.
+            groups = {}  # counterpart span -> [its words' spans, key, surety]
+            for link in caption.clause_links[n].get(target if in_target else second) or ():
+                key = link[2] if len(link) > 2 else True
+                if detail == "key" and not key:
+                    continue  # a pronoun, 是, 这个... - only at "most words"
+                group = groups.setdefault(tuple(link[1]), [[], False, 0.0])
+                group[0].append(tuple(link[0]))
+                group[1] = group[1] or key
+                group[2] = max(group[2], link[3] if len(link) > 3 else 1.0)
+            kept = sorted(groups.items(), key=lambda g: (not g[1][1], -g[1][2]))[:cap]  # cap None: all
+            kept.sort(key=lambda g: min(g[1][0]))  # reading order, by the first word said
+            said_links = tuple(sorted((a, b, k) for k, (_, (spans, _, _)) in enumerate(kept) for a, b in spans))
+            translated_links = tuple(sorted((c, d, k) for k, ((c, d), _) in enumerate(kept)))
         first = True
         if translation is None or prefs["show_original"]:
             # said only differs from what was said when it's been put in the target's script (zh -> zh-hant)
-            lines.append([said, white, target if said != native else caption.lang, first])
+            lines.append([said, white, target if said != native else caption.lang, first, said_links])
             first = False
         if translation is not None:
-            lines.append([translation, QColor(TRANSLATION_COLOR), target if in_target else second, first])
+            lines.append([translation, QColor(TRANSLATION_COLOR), target if in_target else second, first,
+                          translated_links])
     if caption.live:
         lines[-1][0] += " \u2026"
     return [tuple(line) for line in lines]
@@ -249,7 +294,7 @@ class CaptionBlock(QWidget):
         for widget, line in zip((self.primary, self.secondary), [*lines, None]):
             widget.setVisible(line is not None)
             if line is not None:
-                text, color, lang, _ = line
+                text, color, lang, *_ = line
                 widget.set(text, _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang), color,
                            1.8 * scale)
 
@@ -313,6 +358,21 @@ def _caption_text(text, font, width, x, y, color, spans=()):
     return list(paths.values()), layout, h
 
 
+_underline_drops = {}
+
+
+def _underline_drop(font):
+    """How far below the baseline `font`'s marks under letters reach - the
+    dot of Vietnamese's heavy tone (ạ, ọ, ệ) - so a link's underline goes
+    under them rather than through them."""
+    key = font.key()
+    if key not in _underline_drops:
+        path = QPainterPath()
+        path.addText(0, 0, font, "ạẹịọụậệộợự")  # no descenders (g, y): underlines cross those, as usual
+        _underline_drops[key] = max(0.0, path.boundingRect().bottom())
+    return _underline_drops[key]
+
+
 def _first_rewritten(old, new):
     """The index of the first row of `new` that rewrites its row in `old`,
     rather than only growing it (a live caption's last row) - len(new) if
@@ -344,6 +404,8 @@ class _Item:
         self.ghost = False       # removed - fading out where it was, taking no space
         self.lines = []          # [(text, layout, x, y)] its caption lines, to find the word under the mouse
         self.live = False        # its caption is still being spoken
+        self.links = []          # per caption line: its word links, ((start, end, link number), ...)
+        self.clause_starts = []  # per caption line: whether it starts a clause's pair
 
 
 class CaptionCanvas(QWidget):
@@ -422,14 +484,16 @@ class CaptionCanvas(QWidget):
             item.live = caption.live
             lines = caption_lines(caption, target, second, prefs)
             signature = (caption.speaker, caption.lang, caption.langs, caption.live,
-                         tuple((text, color.name(QColor.NameFormat.HexArgb), clause_start)
-                               for text, color, _, clause_start in lines), width,
+                         tuple((text, color.name(QColor.NameFormat.HexArgb), clause_start, links)
+                               for text, color, _, clause_start, links in lines), width,
                          tuple(sorted(prefs.items())), self.overlay.controller.vocab.version)
             if signature != item.signature:
                 old_rows = [text for text, *_ in item.lines] if item.signature is not None else None
                 item.signature, item.text = signature, " ".join(text for text, *_ in lines)
                 old_pixmap = item.pixmap
                 parts, item.lines, item.height = self._build(caption, lines, prefs, width)
+                item.links = [line[4] for line in lines]
+                item.clause_starts = [line[3] for line in lines]
                 item.pixmap = self._render(parts, width, item.height)
                 rewritten = _first_rewritten(old_rows, [text for text, *_ in item.lines]) if old_rows else None
                 if rewritten is not None:
@@ -464,9 +528,18 @@ class CaptionCanvas(QWidget):
             y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
         vocab = self.overlay.controller.vocab
         text_lines = []
-        for i, (text, color, lang, clause_start) in enumerate(lines):
+        arrows = prefs.get("word_links", "off") == "arrows" and prefs["show_original"]
+        above = {}  # link number -> where its curves start: under its words on the row above's last line
+        for i, (text, color, lang, clause_start, links) in enumerate(lines):
             if i:
-                y += self.CLAUSE_GAP if clause_start else self.LINE_GAP
+                # Arrows: every pair gets the gap, links or not, so a row
+                # doesn't jump when its links arrive.
+                if clause_start:
+                    y += ARROW_CLAUSE_GAP * scale if arrows else self.CLAUSE_GAP
+                else:
+                    y += ARROW_GAP * scale if arrows else self.LINE_GAP
+            if clause_start:
+                above = {}
             font = _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang)
             spans = []
             for start, end, saved_color in vocab.spans(text):  # saved words, in their category's colour
@@ -476,8 +549,53 @@ class CaptionCanvas(QWidget):
             paths, layout, h = _caption_text(text, font, width - 2 * pad, pad, y, color, spans)
             parts += [(path, path_color, 1.8 * scale) for path, path_color in paths]
             text_lines.append((text, layout, pad, y))
+            if links and prefs.get("word_links") in ("colours", "arrows"):  # on hover: drawn only when pointed at
+                parts += self._link_parts(layout, pad, y, links, scale, arrows, clause_start, above)
             y += h
         return parts, text_lines, y + pad
+
+    @staticmethod
+    def _link_parts(layout, x, y, links, scale, arrows, upper, above):
+        """Paths for a row's links: each linked word underlined in its
+        link's colour; and with arrows, from the lower row of a pair, a
+        curve from where the word above starts (`above`, filled in by the
+        upper row) down to its counterpart here. Only words on the rows'
+        facing lines get a curve - one from an upper line would cut through
+        the text; the rest are underlined alone."""
+        parts = []
+        last = layout.lineCount() - 1
+        for start, end, number in links:
+            color = QColor(LINK_COLORS[number % len(LINK_COLORS)])
+            for i in range(layout.lineCount()):
+                line = layout.lineAt(i)
+                a, b = max(start, line.textStart()), min(end, line.textStart() + line.textLength())
+                if a >= b:
+                    continue
+                x1, x2 = x + line.cursorToX(a)[0], x + line.cursorToX(b)[0]
+                base = y + line.y() + line.ascent()
+                drop = _underline_drop(layout.font()) + 1.5 * scale
+                underline = QPainterPath()
+                underline.addRoundedRect(QRectF(x1, base + drop, x2 - x1, 2.2 * scale), 1.1 * scale, 1.1 * scale)
+                parts.append((underline, color, 1.2 * scale))
+                if not arrows:
+                    continue
+                middle = (x1 + x2) / 2
+                if upper and i == last:
+                    above.setdefault(number, []).append(QPointF(middle, base + drop + 3 * scale))
+                elif not upper and i == 0:
+                    end_at = QPointF(middle, y + line.y() + 1 * scale)
+                    for start_at in above.get(number, ()):
+                        bend = (end_at.y() - start_at.y()) * 0.6
+                        curve = QPainterPath(start_at)
+                        curve.cubicTo(QPointF(start_at.x(), start_at.y() + bend),
+                                      QPointF(end_at.x(), end_at.y() - bend), end_at)
+                        stroker = QPainterPathStroker()
+                        stroker.setWidth(1.7 * scale)
+                        stroker.setCapStyle(Qt.PenCapStyle.RoundCap)
+                        faint = QColor(color)
+                        faint.setAlphaF(0.9)
+                        parts.append((stroker.createStroke(curve), faint, 1.0 * scale))
+        return parts
 
     def _render(self, parts, width, height):
         """The caption's outlined text, drawn once into a pixmap."""
@@ -620,6 +738,22 @@ class CaptionCanvas(QWidget):
                 x1, x2 = line.cursorToX(a)[0], line.cursorToX(b)[0]
                 rects.append(QRectF(x + x1, round(item.y) + y + line.y(), x2 - x1, line.height()))
         return rects
+
+    def _link_partners(self, item, n, start, end):
+        """[(line index, start, end, link number)]: the word links touching
+        characters start-end of the item's n-th line - on that line and on
+        the other line of its pair - or [] if there are none (or word links
+        are off)."""
+        if self.overlay.controller.prefs.get("word_links", "off") == "off" or n >= len(item.links):
+            return []
+        numbers = {number for a, b, number in item.links[n] if a < end and start < b}
+        if not numbers:
+            return []
+        # A pair is a line starting a clause and the one after it
+        other = n + 1 if item.clause_starts[n] else n - 1
+        lines = [n] + ([other] if 0 <= other < len(item.links) and item.clause_starts[other] != item.clause_starts[n]
+                       else [])
+        return [(m, a, b, number) for m in lines for a, b, number in item.links[m] if number in numbers]
 
     def _char_at(self, item, n, pos):
         """The character of the item's n-th line nearest `pos` - dragging
@@ -814,6 +948,17 @@ class CaptionCanvas(QWidget):
                     p.setPen(Qt.PenStyle.NoPen)
                     p.setBrush(color)
                     for rect in self._word_rects(item, *marked[1:]):
+                        p.drawRoundedRect(rect.adjusted(-3, 0, 3, 0), 5, 5)
+            if self.hovered and self.hovered[0] == item.key and not item.ghost:
+                # The hovered word's links: it and its counterpart in the
+                # other line of the pair, tinted in the link's colour.
+                p.setOpacity(item.alpha)
+                p.setPen(Qt.PenStyle.NoPen)
+                for n, start, end, number in self._link_partners(item, *self.hovered[1:]):
+                    tint = QColor(LINK_COLORS[number % len(LINK_COLORS)])
+                    tint.setAlphaF(0.4)
+                    p.setBrush(tint)
+                    for rect in self._word_rects(item, n, start, end):
                         p.drawRoundedRect(rect.adjusted(-3, 0, 3, 0), 5, 5)
             if item.old_pixmap is not None:
                 # Rows above cross_from as they are; the rest crossfades.

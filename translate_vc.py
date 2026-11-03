@@ -27,15 +27,17 @@ from collections import OrderedDict, deque
 
 from opencc import OpenCC
 
+import aligner
 import clauses
 import dictionary
 import discord_bridge
+import vi_dictionary
 import settings
 import translator
 from captions import join_text
 from lang_codes import TARGET_LANGUAGES
-from overlay_core import (VAD_SAMPLE_RATE, capture_options, is_reliable_transcription, live_options, speech_context,
-                          speech_options)
+from overlay_core import (VAD_SAMPLE_RATE, capture_options, is_reliable_transcription, link_options, live_options,
+                          speech_context, speech_options)
 
 _t2s = OpenCC("t2s")
 _s2t = OpenCC("s2t")
@@ -184,6 +186,7 @@ def _same_words(a, b):
 # the next live update - or the final pass - keeps its translation, and its
 # row on the overlay doesn't move.
 CLAUSE_HISTORY = 3
+LINK_CACHE_SIZE = 4000        # clause/translation pairs whose word links are remembered
 CLAUSE_CACHE_SIZE = 4000      # translations remembered (a long call says a lot of clauses)
 LIVE_GROUPS_KEPT = 64         # captions whose live clauses are kept, as the next section's context
 
@@ -255,6 +258,7 @@ def make_process_segment(targets, out_queue):
     others_recent: "OrderedDict[str, dict]" = OrderedDict()
     lost_to: "OrderedDict[str, str]" = OrderedDict()  # caption group -> the one it lost a duplicate to - that sticks
     clause_cache = OrderedDict()   # (clause, source language, target) -> translation, oldest first
+    link_cache = OrderedDict()     # (clause, translation) -> its word links, oldest first
     # caption group -> live section -> [(clause, {target: (text, is_translation)})]: what a live
     # caption's earlier sections said, as context for its next one
     live_clauses: "dict[str, dict[int, list]]" = {}
@@ -303,6 +307,24 @@ def make_process_segment(targets, out_queue):
         others_recent[group] = {"speaker": speaker, "name": name, "text": text, "start": span[0], "end": span[1],
                                 "final": final, "at": now}
         return True
+
+    def link_clause(text, translation):
+        """Which words of `text` and `translation` say the same thing
+        (aligner.links) - remembered, so a clause and translation that
+        come out the same aren't aligned again."""
+        key = (text, translation)
+        if key in link_cache:
+            link_cache.move_to_end(key)
+            return link_cache[key]
+        try:
+            found = aligner.links(text, translation)
+        except Exception as e:  # one bad pair mustn't cost the caption
+            print(f"[aligner] {type(e).__name__}: {e}")
+            found = []
+        link_cache[key] = found
+        if len(link_cache) > LINK_CACHE_SIZE:
+            link_cache.popitem(last=False)
+        return found
 
     def translate_clause(text, src_lang, target, history):
         """`text` (one clause) in `target` - remembered, or translated with
@@ -473,6 +495,16 @@ def make_process_segment(targets, out_queue):
                         history.append((part, translated))
             for versions, version in zip(per_clause, shown):
                 versions[target_lang] = version
+        # Word links, for the overlays (docs/word-links.md): each clause's
+        # words linked to its translations'. Every clause, a live caption's
+        # last too: once its section is done it's no longer last, but its
+        # text stays - the overlay leaves out links on the clause still
+        # being spoken.
+        per_clause_links = [{} for _ in parts]
+        if link_options["enabled"] and aligner.loaded():
+            for n, (part, versions) in enumerate(zip(parts, per_clause)):
+                per_clause_links[n] = {lang: link_clause(part, text) for lang, (text, is_translation) in versions.items()
+                                       if is_translation and text}
         translations = {target_lang: (join_text(versions[target_lang][0] for versions in per_clause),
                                       any(versions[target_lang][1] for versions in per_clause))
                         for target_lang in (per_clause[0] if per_clause else {})}
@@ -494,7 +526,8 @@ def make_process_segment(targets, out_queue):
             "langs": spoken,
             "native": native_text,
             "translations": translations,
-            "clauses": [{"native": part, "translations": versions} for part, versions in zip(parts, per_clause)],
+            "clauses": [{"native": part, "translations": versions, "links": links}
+                        for part, versions, links in zip(parts, per_clause, per_clause_links)],
             "group": caption_group,
             "final": final,
             "absorb": list(absorb),
@@ -545,6 +578,7 @@ def main():
     # Loads in the background; the main window's status tracks it.
     translator.start(saved["translator"])
     dictionary.start()  # the word lookup's - ~1s, also in the background
+    vi_dictionary.start()  # Vietnamese lookups' - ~0.1s once its cache is made (~1.5s, the first time)
 
     from ui.app import run  # local import - Qt is only needed for the app itself
     run(
