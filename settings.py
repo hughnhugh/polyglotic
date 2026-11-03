@@ -1,7 +1,8 @@
 """
 Settings remembered between launches, in settings.json next to the app, so
 a plain launch comes back the way it was last left: target languages,
-speech model, translator, mic capture, the Discord bridge port, the speech
+speech model, translator, the system audio and mic devices, mic capture,
+the Discord bridge port, the speech
 model's conversation language and context words, live caption timing, the
 subtitle overlays' look, positions and lock, and the local assistant model
 (on/off, and its side chat's place). Command-line options still override
@@ -31,7 +32,8 @@ DEFAULTS = {
     "second_languages": {},
     "model": None,          # filled in by load() - depends on what's installed
     "mic": True,
-    "mic_device": None,     # microphone by name; None = Windows' default
+    "mic_device": None,     # microphone by name; None = Windows' default (followed as it changes)
+    "output_device": None,  # system audio from this output device, by name; None = Windows' default (followed)
     "caption_mic": True,    # caption your own speech (the mic is still captured for nothing else)
     "bridge_port": 8765,
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES

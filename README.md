@@ -177,11 +177,13 @@ game to borderless.
   text size, background opacity, speaker names, the white line above
   translations, how soon they fade, and live
   update timing (below). Also resets overlay positions.
-- **Audio** - which microphone (Windows' default, or pick one - it
-  switches straight away and is remembered), system audio (Windows'
-  default output), whether your own speech is captioned (off saves GPU
-  time), and the Discord plugin's connection, who's in the call, and its
-  port.
+- **Audio** - which output device system audio is captured from and which
+  microphone: Windows' default - followed when you change it in Windows'
+  sound settings, so switching from speakers to a headset just works - or
+  pick one (it switches straight away and is remembered; if it's
+  unplugged, the default stands in until it's back). Also whether your own
+  speech is captioned (off saves GPU time), and the Discord plugin's
+  connection, who's in the call, and its port.
 - **Models** - the speech model (switching takes a few seconds, during
   which captions pause), the translator - its compression and status (see
   [Translator quality](#translator-quality-optional)) - and the local
@@ -470,12 +472,10 @@ captions:
 - **Symlink warning from `huggingface_hub` on first run.** Harmless - Windows
   needs Developer Mode or admin rights for symlinks; without them, model
   files are just copied instead, using a bit more disk space.
-- **No captions ever appear for other people talking.** Check the overlay's
-  status line for `[Capturing system audio: ...]` - it should name your
-  actual output device (headphones/speakers). If Discord's output device
-  differs from your Windows default output device, loopback capture won't
-  hear it - either match them, or see PyAudioWPatch's docs for capturing a
-  specific device.
+- **No captions ever appear for other people talking.** Check the Audio
+  page's system audio device - it should be the one you actually hear
+  through (headphones/speakers). If Discord's output device differs from
+  your Windows default output device, pick Discord's there.
 - **Model switch / GPU memory reading not moving.** The Models page's
   status line is the source of truth for whether a model switch actually
   completed (`Ready (size)`); Home's GPU readout needs `nvidia-ml-py`

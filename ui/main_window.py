@@ -1064,8 +1064,13 @@ class AudioPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(page)
 
-        system = Card("System audio", "Everything your PC plays - Discord, videos, games - from your default "
-                                      "output device. Change that in Windows' sound settings.")
+        system = Card("System audio", "Everything your PC plays - Discord, videos, games.")
+        self.output_choice = QComboBox()
+        self.output_choice.setMinimumWidth(280)
+        self.output_choice.activated.connect(
+            lambda _: controller.set_output_device(self.output_choice.currentData()))
+        system.add(SettingRow("Output device", "Switches straight away. \u201cWindows default\u201d follows whatever "
+                              "Windows' sound settings pick, as it changes.", self.output_choice))
         self.system_line = _StatusLine("Device")
         system.add(self.system_line)
         content.addWidget(system)
@@ -1075,7 +1080,7 @@ class AudioPage(QWidget):
         self.mic_choice.setMinimumWidth(280)
         self.mic_choice.activated.connect(lambda _: controller.set_mic_device(self.mic_choice.currentData()))
         mic.add(SettingRow("Microphone", "Switches straight away. \u201cWindows default\u201d follows whatever "
-                           "Windows' sound settings pick.", self.mic_choice))
+                           "Windows' sound settings pick, as it changes.", self.mic_choice))
         self.mic_on = ToggleSwitch(controller.mic_enabled)
         self.mic_on.toggled.connect(controller.set_mic_enabled)
         mic.add(SettingRow("Listen to my microphone", None, self.mic_on))
@@ -1114,22 +1119,34 @@ class AudioPage(QWidget):
         self.refresh()
 
     def showEvent(self, event):  # noqa: N802
-        self._fill_mic_choice()  # a headset plugged in since shows up when you come back
+        self._fill_choices()
 
-    def _fill_mic_choice(self):
-        devices = self.c.mic_devices()
-        current = self.c.mic_device
-        if current and current not in devices:
-            devices.append(current)  # chosen but unplugged - keep it showing
-        blocked = self.mic_choice.blockSignals(True)
-        self.mic_choice.clear()
-        self.mic_choice.addItem("Windows default", None)
-        for name in devices:
-            self.mic_choice.addItem(name, name)
-        self.mic_choice.setCurrentIndex(max(0, self.mic_choice.findData(current)))
-        self.mic_choice.blockSignals(blocked)
+    def _fill_choices(self):
+        """The device dropdowns, as Windows has the devices now - a headset
+        switched on shows up within a few seconds. Left alone while one's
+        open."""
+        for choice, devices, current in ((self.output_choice, self.c.output_devices(), self.c.output_device),
+                                         (self.mic_choice, self.c.mic_devices(), self.c.mic_device)):
+            if choice.view().isVisible():
+                continue
+            items = [("Windows default", None)] + [(name, name) for name in devices]
+            if current and current not in devices:
+                items.append((f"{current} (not plugged in)", current))  # chosen but unplugged - keep it showing
+            if [(choice.itemText(i), choice.itemData(i)) for i in range(choice.count())] != items:
+                blocked = choice.blockSignals(True)
+                choice.clear()
+                for text, data in items:
+                    choice.addItem(text, data)
+                choice.blockSignals(blocked)
+            index = next((i for i, (_, data) in enumerate(items) if data == current), 0)
+            if choice.currentIndex() != index:
+                blocked = choice.blockSignals(True)
+                choice.setCurrentIndex(index)
+                choice.blockSignals(blocked)
 
     def refresh(self):
+        if self.isVisible():
+            self._fill_choices()
         status = self.c.status
         self.system_line.set(*_status_of("loopback", status.get("loopback")))
         self.mic_line.set(*_status_of("mic", status.get("mic")))

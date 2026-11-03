@@ -92,7 +92,7 @@ class Controller(QObject):
         self._status_queue = queue.Queue()
         overlay_core.status.subscribe(self._status_queue)
         self.pipeline = pipeline_factory(self.caption_queue, self.translate_into, model_size, capture_mic, bridge_port,
-                                         saved["mic_device"])
+                                         saved["mic_device"], saved["output_device"])
 
         self._poll = QTimer(self, interval=40, timeout=self._drain)
 
@@ -291,6 +291,18 @@ class Controller(QObject):
         settings.update(mic=on)
         self.state_changed.emit()
 
+    def output_devices(self):
+        return self.pipeline.system_audio.devices()
+
+    @property
+    def output_device(self):
+        return self.pipeline.system_audio.device_name
+
+    def set_output_device(self, name):
+        self.pipeline.system_audio.set_device(name)
+        settings.update(output_device=name)
+        self.state_changed.emit()
+
     # -- preferences -------------------------------------------------------------------
 
     def set_pref(self, key, value):
@@ -461,8 +473,9 @@ def run(make_process_segment, targets, model_size, capture_mic, bridge_port):
     app.setFont(theme.ui_font())
     app.setStyleSheet(theme.STYLESHEET)
 
-    def pipeline_factory(caption_queue, translate_into, model, mic, port, mic_device):
-        return overlay_core.Pipeline(make_process_segment(translate_into, caption_queue), model, mic, port, mic_device)
+    def pipeline_factory(caption_queue, translate_into, model, mic, port, mic_device, output_device):
+        return overlay_core.Pipeline(make_process_segment(translate_into, caption_queue), model, mic, port, mic_device,
+                                     output_device)
 
     controller = Controller(targets, pipeline_factory, model_size, capture_mic, bridge_port)
 

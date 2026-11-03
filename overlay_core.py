@@ -19,6 +19,7 @@ import pyaudiowpatch as pyaudio
 import torch
 from faster_whisper import WhisperModel
 
+import audio_devices
 import discord_bridge
 import settings
 
@@ -288,11 +289,32 @@ class ModelHolder:
         self._executor.submit(_do_reload)
 
 
+# Both captures follow Windows' sound settings: the audio worker checks this
+# often which devices they should be on - the chosen one if it's plugged
+# in, else Windows' default - and moves them (see _sync_devices).
+DEVICE_POLL_SEC = 1.0
+devices_changed = threading.Event()  # a device picked in the app - check now, not at the next poll
+
+
+def _wanted(chosen, plugged_in, default):
+    """The device to capture: `chosen` if it's plugged in, else Windows'
+    default - None if there's none, or Windows can't say."""
+    try:
+        if chosen and chosen in plugged_in():
+            return chosen
+        return default()
+    except OSError:
+        return None
+
+
 class MicCapture:
     """Owns the mic PyAudio stream + capture thread, startable/stoppable
     independently of loopback capture and the rest of the pipeline. Usable
     (checkbox-driven) before the audio pipeline finishes loading - toggling
-    early just changes what happens once bind() runs after load."""
+    early just changes what happens once bind() runs after load.
+
+    On the chosen microphone, or Windows' default - which it follows when
+    that changes in Windows' sound settings (the audio worker moves it)."""
 
     def __init__(self, initially_on, device_name=None):
         self._desired_on = initially_on
@@ -304,6 +326,9 @@ class MicCapture:
         self._stream = None
         self._thread = None
         self._stop_event = None
+        self._lock = threading.RLock()   # the UI's toggles and the audio worker's moves start/stop it
+        self.capturing = None            # the microphone open, by name
+        self.failed = None               # a wanted one that wouldn't open - not retried until another's wanted
 
     @property
     def enabled(self):
@@ -318,18 +343,20 @@ class MicCapture:
         return self._device_name
 
     def devices(self):
-        """The microphones to choose from - empty until the pipeline's up."""
-        return list_input_devices(self._p) if self._p is not None else []
+        """The microphones to choose from, as Windows has them now."""
+        try:
+            return audio_devices.inputs()
+        except OSError:
+            return []
+
+    def wanted(self):
+        return _wanted(self._device_name, audio_devices.inputs, audio_devices.default_input)
 
     def set_device(self, name):
-        """Switches microphone (None = Windows' default) - restarting
-        capture on it right away if it's running."""
+        """Switches microphone (None = Windows' default) - the audio worker
+        moves capture onto it straight away, if it's running."""
         self._device_name = name
-        if self._p is not None and self._desired_on:
-            def _switch():
-                self._stop_now()
-                self._start_now()
-            threading.Thread(target=_switch, daemon=True).start()
+        devices_changed.set()
 
     def bind(self, p, model_holder, executor, process_segment_fn):
         self._p, self._model_holder, self._executor = p, model_holder, executor
@@ -339,60 +366,225 @@ class MicCapture:
         else:
             status.set("mic", "Off")
 
+    def release(self):
+        """Stops capture and lets go of PortAudio, which is being restarted -
+        rebind() carries on with the new one."""
+        with self._lock:
+            self._stop_now()
+            self._p = None
+
+    def rebind(self, p):
+        with self._lock:
+            self._p = p
+            if self._desired_on:
+                self._start_now()
+
+    def switch(self):
+        """Reopens capture on the microphone it should be on (wanted()) - if
+        it isn't already, or that one hasn't just failed."""
+        with self._lock:
+            want = self.wanted()
+            if self._p is None or not self._desired_on or (want is not None and want in (self.capturing, self.failed)):
+                return
+            self._stop_now()
+            self._start_now()
+
     def set_enabled(self, on):
-        """Safe to call from the Tk thread (the Settings mic checkbox does) -
-        the actual start work happens on a background thread since it can
-        block for a while (torch.hub.load, opening the audio device), and
-        blocking the Tk thread would freeze the whole UI."""
+        """Safe to call from the UI thread (the mic toggle does) - starting
+        and stopping happen on a background thread, since they can block
+        for a while (torch.hub.load, opening the audio device, waiting on
+        the audio worker moving it), and blocking the UI thread would
+        freeze the whole UI."""
         self._desired_on = on
         if self._p is None:
             return  # not bound yet - bind() will apply _desired_on once loaded
-        if on:
-            threading.Thread(target=self._start_now, daemon=True).start()
-        else:
-            self._stop_now()
+        threading.Thread(target=self._start_now if on else self._stop_now, daemon=True).start()
 
     def _start_now(self):
-        if self.active:
+        with self._lock:
+            if self.active or self._p is None:
+                return
+            status.set("mic", "Loading...")
+            # Silero VAD is a stateful streaming model (it carries hidden state
+            # between calls) - it needs its own instance, separate from
+            # loopback's, same as at initial startup.
+            vad_model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
+            if not self._desired_on:
+                status.set("mic", "Off")
+                return  # toggled off again while VAD was loading - abandon
+
+            want = self.wanted()
+            mic_q: "queue.Queue" = queue.Queue()
+            try:
+                stream, info, channels = open_mic_stream(self._p, make_pyaudio_callback(mic_q), want)
+            except Exception as e:  # unplugged meanwhile, in use exclusively...
+                self.failed = want
+                status.set("mic", f"Failed - couldn't open {want or 'a microphone'}: {e}")
+                broadcast(f"[ERROR] couldn't open the microphone {want or ''}: {e}")
+                return
+            if not self._desired_on:
+                stream.close()
+                status.set("mic", "Off")
+                return  # toggled off again while the device was opening - abandon
+
+            stream.start_stream()
+            stop_event = threading.Event()
+            thread = threading.Thread(
+                target=_capture_loop,
+                args=(stop_event, mic_q, int(info["defaultSampleRate"]), channels, vad_model,
+                      self._model_holder, self._executor, self._process_segment_fn, "mic"),
+                daemon=True,
+            )
+            thread.start()
+            self._stream, self._thread, self._stop_event = stream, thread, stop_event
+            self.capturing = info["name"]
+            self.failed = want if want is not None and info["name"] != want else None
+
+    def _stop_now(self):
+        with self._lock:
+            if not self.active:
+                if not self._desired_on:
+                    status.set("mic", "Off")
+                return
+            self._stop_event.set()
+            self._stream.stop_stream()
+            self._stream.close()
+            self._thread.join(timeout=3)
+            self._stream = self._thread = self._stop_event = None
+            self.capturing = None
+            status.set("mic", "Off")
+
+    def shutdown(self):
+        self._stop_now()
+
+
+class SystemAudioCapture:
+    """What the PC plays - an output device's WASAPI loopback: its stream
+    and capture thread. On the chosen output device, or Windows' default -
+    which it follows when that changes in Windows' sound settings (the
+    audio worker moves it), so switching from speakers to a headset
+    doesn't leave it listening to nothing. A chosen one that's unplugged
+    falls back to the default until it's back."""
+
+    def __init__(self, device_name=None):
+        self._device_name = device_name  # None = Windows' default output
+        self._vad_model = self._model_holder = self._executor = self._process_segment_fn = None
+        self._stream = self._thread = self._stop_event = None
+        self.capturing = None   # the output device being captured, by name
+        self.failed = None      # a wanted one that wouldn't open - not retried until another's wanted
+
+    @property
+    def device_name(self):
+        return self._device_name
+
+    def devices(self):
+        """The output devices to choose from, as Windows has them now."""
+        try:
+            return audio_devices.outputs()
+        except OSError:
+            return []
+
+    def wanted(self):
+        return _wanted(self._device_name, audio_devices.outputs, audio_devices.default_output)
+
+    def set_device(self, name):
+        """Switches output device (None = Windows' default) - the audio
+        worker moves capture onto it straight away."""
+        self._device_name = name
+        devices_changed.set()
+
+    def bind(self, vad_model, model_holder, executor, process_segment_fn):
+        self._vad_model, self._model_holder, self._executor = vad_model, model_holder, executor
+        self._process_segment_fn = process_segment_fn
+
+    def start(self, p):
+        """Starts capturing the output it should be on (wanted()) - or, if
+        PortAudio doesn't have that one, PortAudio's own default."""
+        want = self.wanted()
+        device = _loopback_device(p, want) if want else None
+        if device is None:
+            try:
+                device = p.get_default_wasapi_loopback()
+            except Exception:
+                device = None
+        if device is None:
+            self.failed = want
+            status.set("loopback", "Failed - no output device to capture")
+            broadcast("[ERROR] no output device to capture system audio from")
             return
-        status.set("mic", "Loading...")
-        # Silero VAD is a stateful streaming model (it carries hidden state
-        # between calls) - it needs its own instance, separate from
-        # loopback's, same as at initial startup.
-        vad_model, _ = torch.hub.load("snakers4/silero-vad", "silero_vad", trust_repo=True)
-        if not self._desired_on:
-            status.set("mic", "Off")
-            return  # toggled off again while VAD was loading - abandon
-
-        mic_q: "queue.Queue" = queue.Queue()
-        stream, info, channels = open_mic_stream(self._p, make_pyaudio_callback(mic_q), self._device_name)
-        if not self._desired_on:
-            stream.close()
-            status.set("mic", "Off")
-            return  # toggled off again while the device was opening - abandon
-
-        stream.start_stream()
+        name = device["name"].removesuffix(" [Loopback]")
+        audio_q: "queue.Queue" = queue.Queue()
+        try:
+            stream = open_loopback_stream(p, make_pyaudio_callback(audio_q), device)
+            stream.start_stream()
+        except Exception as e:
+            self.failed = want
+            status.set("loopback", f"Failed - couldn't capture {name}: {e}")
+            broadcast(f"[ERROR] couldn't capture system audio from {name}: {e}")
+            return
+        try:
+            self._vad_model.reset_states()  # its state was the last device's audio
+        except AttributeError:
+            pass
         stop_event = threading.Event()
         thread = threading.Thread(
             target=_capture_loop,
-            args=(stop_event, mic_q, int(info["defaultSampleRate"]), channels, vad_model,
-                  self._model_holder, self._executor, self._process_segment_fn, "mic"),
+            args=(stop_event, audio_q, int(device["defaultSampleRate"]), device["maxInputChannels"],
+                  self._vad_model, self._model_holder, self._executor, self._process_segment_fn, ""),
             daemon=True,
         )
         thread.start()
         self._stream, self._thread, self._stop_event = stream, thread, stop_event
+        self.capturing = name
+        self.failed = want if want is not None and name != want else None
+        broadcast(f"[Capturing system audio: {name}]")
+        status.set("loopback", f"Capturing: {name}")
 
-    def _stop_now(self):
-        if not self.active:
+    def stop(self):
+        if self._thread is None:
             return
         self._stop_event.set()
         self._stream.stop_stream()
         self._stream.close()
+        self._thread.join(timeout=3)  # done with the VAD model before the next device's loop takes it
         self._stream = self._thread = self._stop_event = None
-        status.set("mic", "Off")
+        self.capturing = None
 
-    def shutdown(self):
-        self._stop_now()
+    def restart(self, p):
+        self.stop()
+        self.start(p)
+
+
+def _sync_devices(p, system_audio, mic_capture):
+    """Moves capture onto the devices it should be on - after Windows'
+    default changed, or a chosen one was picked or plugged back in.
+    PortAudio only lists the devices there when it started (and can lose
+    track of one unplugged and plugged back in), so for one it doesn't
+    have - or that won't open - it's restarted, both streams reopened.
+    Returns the PortAudio now in use."""
+    out_want = system_audio.wanted()
+    mic_want = mic_capture.wanted() if mic_capture.enabled else None
+    move_out = out_want is not None and out_want not in (system_audio.capturing, system_audio.failed)
+    move_mic = mic_want is not None and mic_want not in (mic_capture.capturing, mic_capture.failed)
+    if not (move_out or move_mic):
+        return p
+    if ((not move_out or _loopback_device(p, out_want) is not None)
+            and (not move_mic or _input_device(p, mic_want) is not None)):
+        if move_out:
+            system_audio.restart(p)
+        if move_mic:
+            mic_capture.switch()
+        if ((not move_out or system_audio.capturing == out_want)
+                and (not move_mic or mic_capture.capturing == mic_want)):
+            return p
+    print(f"[audio] restarting PortAudio for {', '.join(n for n, m in ((out_want, move_out), (mic_want, move_mic)) if m)}")
+    mic_capture.release()
+    system_audio.stop()
+    p.terminate()
+    p = pyaudio.PyAudio()
+    system_audio.start(p)
+    mic_capture.rebind(p)
+    return p
 
 
 _broadcast_queues: "list[queue.Queue]" = []
@@ -458,34 +650,23 @@ def make_pyaudio_callback(audio_q: "queue.Queue[tuple[float, bytes]]"):
     return callback
 
 
-def open_loopback_stream(p, callback):
-    wasapi_info = p.get_host_api_info_by_type(pyaudio.paWASAPI)
-    default_speakers = p.get_device_info_by_index(wasapi_info["defaultOutputDevice"])
-
-    if not default_speakers.get("isLoopbackDevice", False):
-        for loopback in p.get_loopback_device_info_generator():
-            if default_speakers["name"] in loopback["name"]:
-                default_speakers = loopback
-                break
-        else:
-            raise RuntimeError(
-                "Could not find a loopback device matching your default speakers. "
-                "Try setting your Discord/Windows output device explicitly."
-            )
-
-    broadcast(f"[Capturing system audio: {default_speakers['name']}]")
-    status.set("loopback", f"Capturing: {default_speakers['name']}")
-
-    stream = p.open(
+def open_loopback_stream(p, callback, device):
+    """A stream of what's playing on `device` - a PortAudio loopback device."""
+    return p.open(
         format=pyaudio.paInt16,
-        channels=default_speakers["maxInputChannels"],
-        rate=int(default_speakers["defaultSampleRate"]),
+        channels=device["maxInputChannels"],
+        rate=int(device["defaultSampleRate"]),
         frames_per_buffer=1024,
         input=True,
-        input_device_index=default_speakers["index"],
+        input_device_index=device["index"],
         stream_callback=callback,
     )
-    return stream, default_speakers
+
+
+def _loopback_device(p, name):
+    """PortAudio's loopback device for the output device `name`, or None if
+    PortAudio doesn't have it (plugged in since it started)."""
+    return next((d for d in p.get_loopback_device_info_generator() if d["name"] == f"{name} [Loopback]"), None)
 
 
 def _input_devices(p):
@@ -497,20 +678,17 @@ def _input_devices(p):
             and not d.get("isLoopbackDevice", False)]
 
 
-def list_input_devices(p):
-    return [d["name"] for d in _input_devices(p)]
+def _input_device(p, name):
+    return next((d for d in _input_devices(p) if d["name"] == name), None)
 
 
 def open_mic_stream(p, callback, device_name=None):
-    """Opens `device_name`, or Windows' default microphone if that's None or
-    no longer plugged in."""
-    mic = next((d for d in _input_devices(p) if d["name"] == device_name), None) if device_name else None
+    """Opens the microphone `device_name` - or, if PortAudio doesn't have
+    it, PortAudio's own default one."""
+    mic = _input_device(p, device_name) if device_name else None
     if mic is None:
         mic = p.get_default_input_device_info()
     channels = min(int(mic["maxInputChannels"]), 2) or 1
-
-    broadcast(f"[Capturing mic: {mic['name']}]")
-    status.set("mic", f"Capturing: {mic['name']}")
 
     stream = p.open(
         format=pyaudio.paInt16,
@@ -521,6 +699,8 @@ def open_mic_stream(p, callback, device_name=None):
         input_device_index=mic["index"],
         stream_callback=callback,
     )
+    broadcast(f"[Capturing mic: {mic['name']}]")
+    status.set("mic", f"Capturing: {mic['name']}")
     return stream, mic, channels
 
 
@@ -930,7 +1110,7 @@ def _capture_loop_inner(stop_event, audio_q, native_rate, channels, vad_model, m
 
 
 def audio_worker(stop_event: threading.Event, model_holder: ModelHolder, process_segment_fn,
-                  mic_capture: MicCapture):
+                  mic_capture: MicCapture, system_audio: SystemAudioCapture):
     try:
         status.set("vad", "Loading...")
         broadcast("Loading VAD model...")
@@ -946,27 +1126,28 @@ def audio_worker(stop_event: threading.Event, model_holder: ModelHolder, process
         model_holder._bind_executor(executor)
         model_holder._load_initial()
 
-        loopback_q: "queue.Queue[bytes]" = queue.Queue()
-        loopback_stream, loopback_info = open_loopback_stream(p, make_pyaudio_callback(loopback_q))
-        loopback_stream.start_stream()
-        t = threading.Thread(
-            target=_capture_loop,
-            args=(stop_event, loopback_q, int(loopback_info["defaultSampleRate"]),
-                  loopback_info["maxInputChannels"], vad_model, model_holder, executor, process_segment_fn, ""),
-            daemon=True,
-        )
-        t.start()
-
+        system_audio.bind(vad_model, model_holder, executor, process_segment_fn)
+        system_audio.start(p)
         mic_capture.bind(p, model_holder, executor, process_segment_fn)
 
         broadcast("Listening...")
 
+        last_error = None
         while not stop_event.is_set():
-            time.sleep(0.2)
+            devices_changed.wait(DEVICE_POLL_SEC)
+            devices_changed.clear()
+            if stop_event.is_set():
+                break
+            try:
+                p = _sync_devices(p, system_audio, mic_capture)
+                last_error = None
+            except Exception as e:  # keep capturing what it is; said once, not every poll
+                if str(e) != last_error:
+                    print(f"[audio] couldn't follow the audio devices: {type(e).__name__}: {e}")
+                    last_error = str(e)
 
         mic_capture.shutdown()
-        loopback_stream.stop_stream()
-        loopback_stream.close()
+        system_audio.stop()
         p.terminate()
     except Exception as e:
         broadcast(f"[ERROR] {type(e).__name__}: {e}")
@@ -974,20 +1155,22 @@ def audio_worker(stop_event: threading.Event, model_holder: ModelHolder, process
 
 class Pipeline:
     """The running capture pipeline, as the UI sees it: start() it once,
-    reconfigure it live through model_holder / mic_capture /
+    reconfigure it live through model_holder / mic_capture / system_audio /
     set_bridge_port(), and shutdown() on exit."""
 
-    def __init__(self, process_segment_fn, model_size, capture_mic, bridge_port, mic_device=None, device="cuda",
-                 compute_type="float16"):
+    def __init__(self, process_segment_fn, model_size, capture_mic, bridge_port, mic_device=None,
+                 output_device=None, device="cuda", compute_type="float16"):
         self.process_segment_fn = process_segment_fn
         self.model_holder = ModelHolder(model_size, device=device, compute_type=compute_type)
         self.mic_capture = MicCapture(initially_on=capture_mic, device_name=mic_device)
+        self.system_audio = SystemAudioCapture(device_name=output_device)
         self.bridge_port = bridge_port
         self._stop_event = threading.Event()
 
     def start(self):
         threading.Thread(target=audio_worker, daemon=True,
-                         args=(self._stop_event, self.model_holder, self.process_segment_fn, self.mic_capture)).start()
+                         args=(self._stop_event, self.model_holder, self.process_segment_fn, self.mic_capture,
+                               self.system_audio)).start()
         discord_bridge.start(port=self.bridge_port)
         status.set("discord_bridge", f"Listening on port {self.bridge_port} (no client - VAD fallback)")
 
@@ -1004,4 +1187,5 @@ class Pipeline:
 
     def shutdown(self):
         self._stop_event.set()
+        devices_changed.set()  # the audio worker stops now, not at its next device check
         discord_bridge.stop()
