@@ -1,10 +1,12 @@
 """Verifies the side chat's plumbing without the model: the conversation
-transcript it's given (a line per turn, Chinese names as Speaker A..., Me
-for your own lines, the newest within the limit, no live captions), real
+transcript it's given (the time now and who's spoken, a timestamped line
+per turn, silences marked, Chinese names as Speaker A..., Me for your own
+lines, the newest within the limit, no live captions), real
 names back in the answer, where the transcript goes in the messages, and
 the dictionary's pinyin under suggested replies."""
 
 import time
+from datetime import datetime, timedelta
 
 import assistant
 import captions
@@ -30,20 +32,39 @@ def main():
     board.apply(_record("我在东北玩泥巴  wǒ zài dōngběi wán níba", "从火来暖，你说呢", en="It warms me from the inside"))
     board.apply(_record("", "Sure, what time?", you=True))
     board.apply(_record("kaektus", "我还在说", en="I'm still talking", group="g1", final=False))
+    base = datetime(2026, 11, 2, 21, 0, 0)
+    for caption, seconds in zip(board.captions, [0, 10, 20, 240, 285]):  # the live one's left as it is
+        caption.time = base + timedelta(seconds=seconds)
+    now = base + timedelta(minutes=5)
     labels = {}
-    text = assistant.conversation(board.captions, labels)
+    text = assistant.conversation(board.captions, labels, now=now)
     assert labels == {"我在东北玩泥巴  wǒ zài dōngběi wán níba": "Speaker A", "從火來暖": "Speaker B"}, labels
-    head, body = text.split("\n\n")
-    assert head == "People talking: Speaker A, Speaker B, Me", head
+    clock, people, body = text.split("\n\n")
+    assert clock == "Time now: Monday 2 November 2026, 21:05:00", clock
+    assert people.splitlines()[1:] == [  # the latest to speak first
+        "- Me: spoke once, at 21:04:45 (just now): “Sure, what time?”; English",
+        "- Speaker A: last spoke at 21:04:00 (1 minute ago): “Speaker B，你说呢”; first spoke at 21:00:00; 3 lines; "
+        "Mandarin and English",
+        "- Speaker B: spoke once, at 21:00:20 (5 minutes ago): “This is so creepy”; English"], people
     lines = body.splitlines()
-    assert len(lines) == 4, text
-    assert lines[0].endswith("Speaker A: 他今天早上给我打电话了 (English: He called me this morning) I'm freaking out"), \
-        lines[0]
-    assert lines[2].endswith("Speaker A: Speaker B，你说呢"), lines[2]  # their name said - its garbled translation dropped
-    assert lines[3].endswith("Me: Sure, what time?"), lines[3]
-    assert assistant.conversation(board.captions, labels, limit=len(lines[3]) + 5) == f"People talking: Me\n\n{lines[3]}"
-    print("OK: the transcript - a turn per line, Chinese names as labels (said ones too), Me, newest within the "
-          "limit, no live captions")
+    assert lines == [
+        "[21:00:00] Speaker A: 他今天早上给我打电话了 (English: He called me this morning) I'm freaking out",
+        "[21:00:20] Speaker B: This is so creepy",
+        "(4 minutes of silence)",
+        "[21:04:00] Speaker A: Speaker B，你说呢",  # their name said - its garbled translation dropped
+        "[21:04:45] Me: Sure, what time?"], body
+    print("OK: the transcript - the time now, who's spoken (latest first: when, last words, lines, languages), a "
+          "timestamped line per turn, silences marked, Chinese names as labels (said ones too), Me, no live captions")
+
+    short = assistant.conversation(board.captions, labels, limit=len(lines[4]) + 5, now=now)
+    assert short.split("\n\n")[1] == people, short  # everyone's still listed
+    assert short.split("\n\n")[2:] == ["Only the latest part fits below: it starts at 21:04:45, and the earlier "
+                                        "lines, from 21:00:00, are left out.", lines[4]], short
+    fits_silence = len(lines[2]) + len(lines[3]) + len(lines[4]) + 3
+    assert short != assistant.conversation(board.captions, labels, limit=fits_silence, now=now)
+    assert assistant.conversation(board.captions, labels, limit=fits_silence, now=now).endswith(
+        "left out.\n\n" + "\n".join(lines[3:])), "never starts on a silence"
+    print("OK: the newest turns within the limit, with a note of what's left out")
 
     answer = "**Speaker A** told a story, and speaker b found it creepy. Speaker AB isn't anyone. **Me** asked me."
     assert assistant.restore_names(answer, labels) == ("**我在东北玩泥巴  wǒ zài dōngběi wán níba** told a story, and "

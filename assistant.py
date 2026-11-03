@@ -27,9 +27,11 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 import dictionary
 from child_process import free_port, kill_with_parent
+from lang_codes import spoken_language_name
 from overlay_core import LOG_DIR, status
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -222,13 +224,22 @@ def explain(phrase, sentence, translation, meanings, on_text, cancelled=lambda: 
 ME = "Me"
 
 
-def conversation(captions, labels, limit=CONVERSATION_CHARS):
-    """The captions as a transcript for the model: who's talking, then one
-    line per turn - a person's back-to-back captions joined - oldest first,
-    the most recent turns that fit in `limit` characters. The user's own
-    lines are ME, and lines not in English get an English translation
-    alongside, which steadies a small model on misrecognized speech. Live
-    (unfinished) captions are left out.
+QUIET_MARK_SEC = 120  # a silence this long gets its own line in the transcript
+LAST_SAID_CHARS = 120  # of each person's last line, in the list of people
+
+
+def conversation(captions, labels, limit=CONVERSATION_CHARS, now=None):
+    """The captions as a transcript for the model. First the time `now`
+    (default: the clock's) and everyone who's spoken, the latest to speak
+    first - when they last spoke, how long ago and what they said, when
+    they started, how many lines, in what languages - then
+    one line per turn (a person's back-to-back captions joined), oldest
+    first, each starting with the time it was said, [HH:MM:SS]: the most
+    recent turns that fit in `limit` characters, with a note of what's left
+    out, and long silences marked - a small model doesn't work those out
+    from the times alone. The user's own lines are ME, and lines not in
+    English get an English translation alongside, which steadies a small
+    model on misrecognized speech. Live (unfinished) captions are left out.
 
     Speakers with Chinese in their names are "Speaker A", "Speaker B"... -
     a model can't help reading such a name as part of the conversation
@@ -237,6 +248,7 @@ def conversation(captions, labels, limit=CONVERSATION_CHARS):
     `labels` ({name: label}) is added to as speakers turn up, and kept by the
     caller so a person's label lasts the session; restore_names() puts the
     real names back into the model's answer."""
+    now = now or datetime.now()
     finished = [c for c in captions if not c.live]
     for c in finished:
         if not c.is_you and c.speaker not in labels and dictionary.has_han(c.speaker):
@@ -244,29 +256,73 @@ def conversation(captions, labels, limit=CONVERSATION_CHARS):
             labels[c.speaker] = f"Speaker {chr(ord('A') + n)}" if n < 26 else f"Speaker {n + 1}"
     spoken = {_simplified(max(_han_runs(name), key=len)): label for name, label in labels.items()}
     spoken = {form: label for form, label in spoken.items() if len(form) > 1}  # 雪 alone is just a word
-    turns = []  # [who, time, [texts]]
+    people = {}  # who -> [lines, first time, last time, {languages}, last line], the last to speak last
+    turns = []   # [who, first time, last time, [texts]]
     for c in finished:
         who = ME if c.is_you else labels.get(c.speaker) or c.speaker or "Someone"
         text, named = _label_names(c.native, spoken)
         english = c.translations.get("en")
-        if english and english[1] and english[0] and not named:  # a name in it - its translation garbles that
+        if english and english[1] and english[0] and not named:  # a name in it - its translation garbled that
             text += f" (English: {english[0]})"
+        person = people[who] = people.pop(who, None) or [0, c.time, c.time, {}, ""]  # to the end: spoke last
+        person[0] += 1
+        person[2], person[4] = c.time, text
+        person[3].update(dict.fromkeys(code for code in (c.langs or (c.lang,)) if code))
         if turns and turns[-1][0] == who:
-            turns[-1][2].append(text)
+            turns[-1][2] = c.time
+            turns[-1][3].append(text)
         else:
-            turns.append([who, c.time, [text]])
+            turns.append([who, c.time, c.time, [text]])
+    lines, previous_end = [], None
+    for who, start, end, texts in turns:
+        if previous_end is not None and (start - previous_end).total_seconds() >= QUIET_MARK_SEC:
+            lines.append(f"({_duration((start - previous_end).total_seconds())} of silence)")
+        lines.append(f"[{start:%H:%M:%S}] {who}: {' '.join(texts)}")
+        previous_end = end
     kept, used = [], 0
-    for who, when, texts in reversed(turns):
-        line = f"[{when:%H:%M}] {who}: {' '.join(texts)}"
+    for line in reversed(lines):
         if used + len(line) > limit:
             break
-        kept.append((who, line))
+        kept.append(line)
         used += len(line) + 1
+    while kept and not kept[-1].startswith("["):  # it'd start on a silence
+        kept.pop()
     if not kept:
         return ""
     kept.reverse()
-    people = ", ".join(dict.fromkeys(who for who, _ in kept))
-    return f"People talking: {people}\n\n" + "\n".join(line for _, line in kept)
+    head = [f"Time now: {now:%A} {now.day} {now:%B %Y, %H:%M:%S}", "",
+            "People who've spoken, the latest to speak first:"]
+    # Most recent first, each with their last words: a small model reads
+    # "who's gone quiet" and "what did X just say" off this far more
+    # reliably than from scanning the times in the transcript.
+    for who, (count, first, last, languages, said) in reversed(people.items()):
+        said = said if len(said) <= LAST_SAID_CHARS else said[:LAST_SAID_CHARS - 3].rstrip() + "..."
+        when = (f"spoke once, at {first:%H:%M:%S} ({_ago(now, last)}): “{said}”" if count == 1 else
+                f"last spoke at {last:%H:%M:%S} ({_ago(now, last)}): “{said}”; first spoke at {first:%H:%M:%S}; "
+                f"{count} lines")
+        names = [spoken_language_name(code) for code in languages]
+        speaks = f"; {' and '.join([', '.join(names[:-1]), names[-1]])}" if len(names) > 1 else \
+            f"; {names[0]}" if names else ""
+        head.append(f"- {who}: {when}{speaks}")
+    if len(kept) < len(lines):
+        head += ["", f"Only the latest part fits below: it starts at {kept[0][1:9]}, and the earlier lines, "
+                     f"from {turns[0][1]:%H:%M:%S}, are left out."]
+    return "\n".join(head) + "\n\n" + "\n".join(kept)
+
+
+def _duration(seconds):
+    """"45 seconds", "3 minutes", "1 hour 5 minutes"."""
+    seconds = max(0, round(seconds))
+    if seconds < 60:
+        return f"{seconds} second{'s' if seconds != 1 else ''}"
+    hours, minutes = divmod(round(seconds / 60), 60)
+    return " ".join(([f"{hours} hour{'s' if hours > 1 else ''}"] if hours else [])
+                    + ([f"{minutes} minute{'s' if minutes > 1 else ''}"] if minutes else []))
+
+
+def _ago(now, then):
+    seconds = (now - then).total_seconds()
+    return "just now" if seconds < 30 else f"{_duration(seconds)} ago"
 
 
 def restore_names(answer, labels):

@@ -29,6 +29,7 @@ from PySide6.QtGui import (QColor, QFont, QFontMetricsF, QLinearGradient, QPaint
 from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizeGrip, QSizePolicy, QVBoxLayout, QWidget
 
 import dictionary
+from lang_codes import spoken_language_name
 from ui import theme
 from ui.lookup import context_for
 
@@ -194,14 +195,6 @@ def _caption_font(px, weight, text="", lang=None):
 
 # What was spoken, as the tag beside the speaker: Chinese speech is
 # "Mandarin" (its target name, "Chinese (Simplified)", describes a script).
-_SPOKEN_NAMES = {"zh": "Mandarin", "yue": "Cantonese"}
-
-
-def spoken_language_name(code):
-    from lang_codes import LANGUAGE_NAMES
-    return _SPOKEN_NAMES.get(code) or LANGUAGE_NAMES.get(code) or code.upper()
-
-
 def spoken_languages_label(caption):
     """"Mandarin", or "Mandarin + English" for a line mixing languages."""
     return " + ".join(spoken_language_name(code) for code in (caption.langs or (caption.lang,)))

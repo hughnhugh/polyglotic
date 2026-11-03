@@ -308,7 +308,11 @@ llama.cpp server (the translator's, in `bin\`), behind two features:
 - **The side chat** - the chat button in an unlocked overlay's header opens
   it beside the overlay. Ask it anything - a word, how to say something,
   what someone meant - with the conversation so far as context (the switch
-  under the messages; roughly the last 9,000 characters of captions), or
+  under the messages; roughly the last 9,000 characters of captions, each
+  turn with the time it was said, plus the time now and who's spoken - when
+  each last spoke and what they said, when they started, how many lines, in
+  what languages - so it can answer "what did Pedro just say?", "what
+  happened in the last 5 minutes?" or "who joined when?"), or
   in one click: **Summarise** the conversation, **Explain the last line**
   (the latest Chinese line someone said, broken down for a learner), or
   **Help me reply** (three short replies in the conversation's language,

@@ -62,4 +62,12 @@ TARGET_LANGUAGES = {
 
 LANGUAGE_NAMES = {code: names[0] for code, names in TARGET_LANGUAGES.items()}
 
+# A spoken language by name - "Mandarin", not the written target's "Chinese (Simplified)"
+_SPOKEN_NAMES = {"zh": "Mandarin", "yue": "Cantonese"}
+
+
+def spoken_language_name(code):
+    return _SPOKEN_NAMES.get(code) or LANGUAGE_NAMES.get(code) or code.upper()
+
+
 CHINESE_CODES = {"zh", "zh-hant", "yue"}

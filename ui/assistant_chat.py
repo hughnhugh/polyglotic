@@ -48,8 +48,15 @@ SYSTEM = ("You are a helpful assistant built into vc-translator, a live translat
 # Goes in the latest message, right before the question - a small model
 # loses track of a transcript far back in the system prompt, and tells the
 # story as the user's own.
-CONVERSATION = (f"Here's my voice chat so far, transcribed by speech recognition (it may contain mistakes), one line "
-                f"per turn, with English translations of lines that aren't in English.\n"
+CONVERSATION = (f"Here's my voice chat so far, transcribed by speech recognition (it may contain mistakes). First the "
+                f"time now and everyone who's spoken, then the conversation: one line per turn, with English "
+                f"translations of lines that aren't in English.\n"
+                f"- Each line starts with the time it was said, [hours:minutes:seconds] on a 24-hour clock. Compare "
+                f"it with the time now for when something was said, how long ago, or what was said in the last few "
+                f"minutes. Long silences are marked.\n"
+                f"- The list of people, the latest to speak first, says when each last spoke and what they said, "
+                f"when they first spoke, how many lines they've said and in what languages - use it for what "
+                f"someone just said, who's talked most, who's gone quiet, or who joined when.\n"
                 f"- People are labelled by their Discord names, or as Speaker A, Speaker B and so on: just labels "
                 f"for who's talking. Use them as they're written.\n"
                 f"- Lines from {assistant.ME} are mine. Everyone else is someone else in the call: their \"I\", "
