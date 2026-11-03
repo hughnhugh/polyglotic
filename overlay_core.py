@@ -88,7 +88,8 @@ REPLY_TRIM_KEEP_SEC = 0.3
 # words, and whether to add the Discord channel members' names to them -
 # set live from Settings (see settings.CONVERSATION_LANGUAGES) and read by
 # process_segment for every segment, through speech_context().
-speech_options = {"language": None, "context": "", "auto_names": True}
+speech_options = {"language": None, "context": "", "auto_names": True,
+                  "skip_words": ""}  # captions made only of these aren't shown (see translate_vc._only_skip_words)
 # Live captions: seconds between updates of a speaker's growing live
 # caption (None = off - only the caption on each pause), and whether those
 # updates are translated too or show the original text until the pause.

@@ -58,11 +58,16 @@ def context_for(caption, line):
     """The Context of a word in `line`, one of `caption`'s lines: the line
     itself, and the caption in another language - for a Chinese line, not
     Chinese (English first); for any other, Chinese if there is one (what
-    was said, or a translation into it)."""
+    was said, or a translation into it). A line that's one of the caption's
+    clauses (an overlay row - see clauses.py) pairs with that clause."""
     sentence = line.removesuffix(" …")
-    english = caption.translations.get("en")
-    candidates = (([english[0]] if english and english[1] else []) + [caption.native]
-                  + [text for text, is_translation in caption.translations.values() if is_translation])
+    native, translations = next(
+        ((n, versions) for n, versions in (getattr(caption, "clauses", ()) or ())
+         if sentence == n or any(sentence == text for text, _ in versions.values())),
+        (caption.native, caption.translations))
+    english = translations.get("en")
+    candidates = (([english[0]] if english and english[1] else []) + [native]
+                  + [text for text, is_translation in translations.values() if is_translation])
     others = [t for t in candidates if t and t != sentence]
     if dictionary.has_han(sentence):
         translation = next((t for t in others if not dictionary.has_han(t)), "")

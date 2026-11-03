@@ -19,7 +19,10 @@ The prompt tells the model it's translating a casual, speech-recognized
 voice-chat line, so it keeps the spoken register instead of formalizing
 it. Previous captions are deliberately NOT passed as context: in the same
 evaluation that helped some ambiguous fragments but more often led the
-model to over-interpret a line into something fluent but different.
+model to over-interpret a line into something fluent but different. A
+caption is translated a clause at a time, though (see clauses.py), and
+there the same speaker's earlier clauses in it are given (translate()'s
+history) - a clause alone too often loses its subject or its sense.
 """
 
 import atexit
@@ -179,14 +182,24 @@ def _prompt(text, src_lang, target):
             f"4. Translate the [Source Text] into {name_en}.")
 
 
-def translate(text, src_lang, target):
+def translate(text, src_lang, target, history=()):
     """src_lang: Whisper's detected language code (any); target: a key of
-    TARGET_LANGUAGES. Returns "" if the translator isn't available or the
-    request fails - callers show the native text alone in that case."""
+    TARGET_LANGUAGES. history: [(text, translation)] said just before by
+    the same person - a caption's earlier clauses (see clauses.py) - given
+    as earlier turns of the conversation, so `text` is read in context but
+    only it is translated. (Put in the prompt as a "preceding text"
+    section instead, the model often translated that too - see
+    docs/line-by-line-captions.md.) Returns "" if the translator isn't
+    available or the request fails - callers show the native text alone
+    in that case."""
     if not _ready.wait(READY_WAIT_SEC if not _failed.is_set() else 0):
         return ""
+    messages = []
+    for said, translated in history:
+        messages += [{"role": "user", "content": _prompt(said, src_lang, target)},
+                     {"role": "assistant", "content": translated}]
     body = json.dumps({
-        "messages": [{"role": "user", "content": _prompt(text, src_lang, target)}],
+        "messages": messages + [{"role": "user", "content": _prompt(text, src_lang, target)}],
         "max_tokens": MAX_OUTPUT_TOKENS,
         # Greedy decoding plus the model card's light repetition penalty -
         # the configuration evaluated in eval/compare_translators.py.

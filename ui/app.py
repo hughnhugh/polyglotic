@@ -329,6 +329,11 @@ class Controller(QObject):
         settings.update(auto_names=on)
         self.prefs_changed.emit()
 
+    def set_skip_words(self, text):
+        speech_options["skip_words"] = text
+        settings.update(skip_words=text)
+        self.prefs_changed.emit()
+
     def set_live_interval(self, seconds):
         live_options["interval"] = seconds
         settings.update(live_interval=seconds)

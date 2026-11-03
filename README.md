@@ -154,7 +154,7 @@ game to borderless.
   categories, change their colours, add or delete them, move a word
   between them or remove it, and look up any word by typing it.
 - **Languages** - what to translate into (each gets an overlay), the
-  spoken language, and names & slang:
+  spoken language, names & slang, and words not captioned on their own:
   - **Spoken language** - Auto-detect (default), or English, Mandarin,
     Cantonese or Vietnamese. Choosing one skips the speech model's
     language detection, so short or mumbled speech can't be misread as
@@ -173,6 +173,11 @@ game to borderless.
     are used, most recent speakers first. Given a short or unclear clip,
     the speech model sometimes "transcribes" the list itself - a caption
     that's just names read back is dropped.
+  - **Not captioned on their own** - small acknowledgements and
+    hesitations (嗯, 呃, 对, 哦, 啊, ừ, mm-hmm, um... - edit the list, commas between):
+    a caption that's nothing but these, repeated or drawn out ("嗯嗯。",
+    "Hmmm."), isn't shown, live or final. A longer line starting with one
+    ("嗯，我觉得…") is kept whole.
 - **Captions** - how the overlays look and behave, with a live preview:
   text size, background opacity, speaker names, the white line above
   translations, how soon they fade, and live
@@ -217,6 +222,17 @@ seconds, with nobody else captioned in between, their new speech is
 joined onto that caption and the whole run re-transcribed and
 re-translated as one. Speech running over 20 seconds without a pause is
 captioned in 20-second pieces.
+
+A caption is shown a clause at a time - what was said, then its
+translation, for each sentence or long-enough clause - and translated that
+way too, each clause with the speaker's previous few as context. A clause
+whose words come out the same in the next update keeps its translation,
+so during a monologue the lines you've read stay put and only the one
+being spoken changes. And captions only ever move up the overlay: one that
+gets shorter (the final pass tidying a live caption, say) leaves space at
+the bottom rather than pulling the rest down, the next caption filling it,
+and a live caption that has to push the rest up leaves itself a couple of
+lines to grow into. (Design notes: `docs/line-by-line-captions.md`.)
 
 Captions' **"Live updates every"** box sets the update interval: pick a
 suggestion or type any number of seconds from 0.5 to 20, or `Off` for no
@@ -417,7 +433,12 @@ mixed loopback audio. Some rules keep that mixing from producing wrong
 captions:
 
 - When two people are flagged as speaking over the same audio (say, one's
-  mic picking up the other), it's captioned once, not twice.
+  mic picking up the other), it's captioned once, not twice - by whoever's
+  been doing more of the talking in the last 30 seconds (about even: the
+  later caption). That goes for short replies too ("挺好。"): two captions
+  of the same moment with the same words are one person's speech. Someone
+  echoing just the end of another's line is still captioned, and a
+  finished caption is only ever taken back by another finished one.
 - Someone flagged as speaking for over 20 seconds straight - usually an
   open mic held on by background noise - can't cause anyone else's speech
   to be skipped that way, and their live captions are skipped while the

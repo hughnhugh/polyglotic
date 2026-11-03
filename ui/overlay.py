@@ -46,22 +46,27 @@ _SELECTION_COLOR = QColor(124, 156, 255, 105)   # a phrase being dragged across 
 
 
 def caption_lines(caption, target, second, prefs):
-    """[(text, colour, language)] for a caption in `target`'s overlay: what
-    was said (white) - left out if the overlay hides originals and there's
-    a translation - then its translation (yellow), into the target or,
-    for a line already in it, into the overlay's second language. A live
-    caption's last line trails off."""
-    said, translation = caption.lines_for(target, second)
-    in_target = caption.translations.get(target, ("", False))[1]
+    """[(text, colour, language, starts a clause)] for a caption in
+    `target`'s overlay - a clause at a time (see clauses.py), so a long
+    caption reads line by line and a clause whose words didn't change
+    keeps its rows as they were: what was said (white) - left out if the
+    overlay hides originals and there's a translation - then its
+    translation (yellow), into the target or, for a clause already in it,
+    into the overlay's second language. A live caption's last line trails
+    off."""
+    white = QColor("white")
+    if caption.live:
+        white.setAlphaF(0.85)
     lines = []
-    if translation is None or prefs["show_original"]:
-        white = QColor("white")
-        if caption.live:
-            white.setAlphaF(0.85)
-        # said only differs from native when it's been put in the target's script (zh -> zh-hant)
-        lines.append([said, white, target if said != caption.native else caption.lang])
-    if translation is not None:
-        lines.append([translation, QColor(TRANSLATION_COLOR), target if in_target else second])
+    for (native, _), (said, translation, in_target) in zip(caption.clauses or ((caption.native, None),),
+                                                            caption.clause_lines(target, second)):
+        first = True
+        if translation is None or prefs["show_original"]:
+            # said only differs from what was said when it's been put in the target's script (zh -> zh-hant)
+            lines.append([said, white, target if said != native else caption.lang, first])
+            first = False
+        if translation is not None:
+            lines.append([translation, QColor(TRANSLATION_COLOR), target if in_target else second, first])
     if caption.live:
         lines[-1][0] += " \u2026"
     return [tuple(line) for line in lines]
@@ -244,7 +249,7 @@ class CaptionBlock(QWidget):
         for widget, line in zip((self.primary, self.secondary), [*lines, None]):
             widget.setVisible(line is not None)
             if line is not None:
-                text, color, lang = line
+                text, color, lang, _ = line
                 widget.set(text, _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang), color,
                            1.8 * scale)
 
@@ -308,6 +313,16 @@ def _caption_text(text, font, width, x, y, color, spans=()):
     return list(paths.values()), layout, h
 
 
+def _first_rewritten(old, new):
+    """The index of the first row of `new` that rewrites its row in `old`,
+    rather than only growing it (a live caption's last row) - len(new) if
+    only rows at the end went - or None if nothing was rewritten."""
+    for i, (a, b) in enumerate(zip(old, new)):
+        if a != b and not (i == len(old) - 1 and b.startswith(a.removesuffix(" \u2026"))):
+            return i
+    return len(new) if len(new) < len(old) else None
+
+
 class _Item:
     """One caption as the canvas draws it: its text as outlined paths, and
     where it is / is heading on screen."""
@@ -325,21 +340,27 @@ class _Item:
         self.target_alpha = 1.0
         self.old_pixmap = None   # the previous text while crossfading to a rewrite
         self.cross = 1.0         # 0 -> 1: old text out, new text in
+        self.cross_from = 0      # where the crossfade starts - rows above it weren't rewritten
         self.ghost = False       # removed - fading out where it was, taking no space
         self.lines = []          # [(text, layout, x, y)] its caption lines, to find the word under the mouse
+        self.live = False        # its caption is still being spoken
 
 
 class CaptionCanvas(QWidget):
     """Draws an overlay's captions and animates every change: captions ease
-    to new positions when anything above or below them changes height (a
-    new caption, a live caption growing a line, a join), arrive fading and
-    rising into place, leave fading out while the rest close the gap, and
-    crossfade when their text is rewritten (text that only grows just
-    extends). The wheel scrolls smoothly too. One painted surface rather
-    than a widget per caption - widgets resize in single frames, which is
-    what read as flicker."""
+    to new positions when anything changes height (a new caption, a live
+    caption growing a line, a join), arrive fading and rising into place,
+    leave fading out while the rest close the gap, and crossfade when their
+    text is rewritten (text that only grows just extends). The wheel
+    scrolls smoothly too. One painted surface rather than a widget per
+    caption - widgets resize in single frames, which is what read as
+    flicker.
+
+    Following the live end, captions only ever move up - the transcript
+    reads in one direction (see _layout)."""
 
     LINE_GAP = 4         # between a caption's speaker line, translation and original
+    CLAUSE_GAP = 9       # before each clause's rows after the first - each said/translated pair reads as one
     CAPTION_GAP = 14     # between captions
     # Positions move on a critically damped spring: they start from rest,
     # accelerate, and settle without overshoot - and keep their momentum
@@ -349,6 +370,10 @@ class CaptionCanvas(QWidget):
     FADE_TAU = 0.07      # seconds - fade in/out time constant
     CROSSFADE = 0.2      # seconds
     RISE = 14            # px a new caption rises as it fades in
+    # A live caption at the bottom that has to push the rest up pushes this
+    # many lines further, and grows into them - the transcript steps up now
+    # and then rather than with every update.
+    HEADROOM_LINES = 2
 
     def __init__(self, overlay):
         super().__init__(overlay)
@@ -359,6 +384,10 @@ class CaptionCanvas(QWidget):
         self.scroll = 0.0                 # content scrolled off the top, animated toward target_scroll
         self.target_scroll = 0.0
         self.following = True
+        self._reanchor = True             # next layout: settle at the bottom afresh (see _layout)
+        self._scroll_hi = 0.0             # scrolled back from below max_scroll() - space left at the bottom
+        self._anchor_key = None           # (width, height, prefs) the layout was last made for
+        self._line_height = 28.0          # a caption line's, at the current text size
         self.on_scrolled_back = None      # set by the overlay
         self.on_back_at_bottom = None
         self._last_frame = time.monotonic()
@@ -375,6 +404,11 @@ class CaptionCanvas(QWidget):
     def set_captions(self, captions, target, prefs, second=None):
         """Brings the canvas up to date with `captions` (top to bottom)."""
         width = self.width()
+        anchor_key = (width, self.height(), tuple(sorted(prefs.items())))
+        if anchor_key != self._anchor_key:  # resized or restyled - everything reflows anyway
+            self._anchor_key, self._reanchor = anchor_key, True
+            self._line_height = QFontMetricsF(_caption_font(BASE_TEXT_PX * prefs["text_scale"],
+                                                            QFont.Weight.Medium)).height()
         keys = [c.key for c in captions]
         for key in [k for k in self.order if k not in set(keys)]:
             item = self.items.pop(key)
@@ -385,18 +419,26 @@ class CaptionCanvas(QWidget):
             item = self.items.get(caption.key)
             if item is None:
                 item = self.items[caption.key] = _Item(caption.key)
+            item.live = caption.live
             lines = caption_lines(caption, target, second, prefs)
             signature = (caption.speaker, caption.lang, caption.langs, caption.live,
-                         tuple((text, color.name(QColor.NameFormat.HexArgb)) for text, color, _ in lines), width,
+                         tuple((text, color.name(QColor.NameFormat.HexArgb), clause_start)
+                               for text, color, _, clause_start in lines), width,
                          tuple(sorted(prefs.items())), self.overlay.controller.vocab.version)
             if signature != item.signature:
-                primary = " ".join(text for text, _, _ in lines)
-                rewritten = item.signature is not None and not primary.startswith(item.text.rstrip(" …"))
-                if rewritten:
-                    item.old_pixmap, item.cross = item.pixmap, 0.0
-                item.signature, item.text = signature, primary
+                old_rows = [text for text, *_ in item.lines] if item.signature is not None else None
+                item.signature, item.text = signature, " ".join(text for text, *_ in lines)
+                old_pixmap = item.pixmap
                 parts, item.lines, item.height = self._build(caption, lines, prefs, width)
                 item.pixmap = self._render(parts, width, item.height)
+                rewritten = _first_rewritten(old_rows, [text for text, *_ in item.lines]) if old_rows else None
+                if rewritten is not None:
+                    # Only from the first rewritten row down - the rows above
+                    # are unchanged, and fading them through themselves would
+                    # dim them for a moment.
+                    item.old_pixmap, item.cross = old_pixmap, 0.0
+                    item.cross_from = (round(item.lines[rewritten][3] - self.LINE_GAP / 2)
+                                       if rewritten < len(item.lines) else math.ceil(item.height))
                 if self.hovered and self.hovered[0] == caption.key:
                     self.hovered = None  # its text moved - found again on the next mouse move
         self.order = keys
@@ -422,9 +464,9 @@ class CaptionCanvas(QWidget):
             y += QFontMetricsF(font).height() + self.LINE_GAP * 0.5
         vocab = self.overlay.controller.vocab
         text_lines = []
-        for i, (text, color, lang) in enumerate(lines):
+        for i, (text, color, lang, clause_start) in enumerate(lines):
             if i:
-                y += self.LINE_GAP
+                y += self.CLAUSE_GAP if clause_start else self.LINE_GAP
             font = _caption_font(BASE_TEXT_PX * scale, QFont.Weight.Medium, text, lang)
             spans = []
             for start, end, saved_color in vocab.spans(text):  # saved words, in their category's colour
@@ -462,12 +504,16 @@ class CaptionCanvas(QWidget):
 
     def _layout(self):
         """Where every caption should be: stacked top to bottom, the whole
-        stack sitting at the bottom when it's shorter than the canvas."""
+        stack sitting at the bottom when it's shorter than the canvas.
+        Following the live end (see _following_top), captions only move up."""
         total = self._content_height()
         if self.following:
-            self.target_scroll = max(0.0, total - self.height())
-        self.target_scroll = min(max(0.0, self.target_scroll), self.max_scroll())
-        top = max(0.0, self.height() - total) - self.target_scroll
+            top = self._following_top(total)
+            self.target_scroll = max(0.0, self.height() - total) - top
+        else:
+            self.target_scroll = min(max(0.0, self.target_scroll), max(self.max_scroll(), self._scroll_hi))
+            top = max(0.0, self.height() - total) - self.target_scroll
+        self._reanchor = False
         for key in self.order:
             item = self.items[key]
             item.target_y = top
@@ -476,6 +522,31 @@ class CaptionCanvas(QWidget):
             top += item.height + self.CAPTION_GAP
         self._start()
 
+    def _following_top(self, total):
+        """Where the stack's top goes, following the live end: as low as it
+        can be while (a) it fits on the canvas and (b) no caption already
+        placed moves down. So a caption shrinking - the final pass merging
+        rows, a duplicate taken back - doesn't pull the ones above down:
+        those below it move up, and blank space is left at the bottom. A
+        caption growing pushes the ones above up - or, at the bottom, first
+        grows into that space. A live caption at the bottom that has to
+        push leaves HEADROOM_LINES spare to grow into. Settles at the
+        bottom afresh after a resize, a restyle, or scrolling back."""
+        bottom = self.height() - total  # the stack's top when it sits at the bottom
+        if self._reanchor or not self.order:
+            return bottom
+        placed, offset = math.inf, 0.0  # the lowest top that moves no placed caption down
+        for key in self.order:
+            item = self.items[key]
+            if item.y is not None:  # placed before - arrivals have no place yet
+                placed = min(placed, item.target_y - offset)
+            offset += item.height + self.CAPTION_GAP
+        if placed <= bottom:
+            return placed  # fits - with whatever space was left below it
+        if self.items[self.order[-1]].live:
+            return bottom - self.HEADROOM_LINES * (self._line_height + self.LINE_GAP)
+        return bottom
+
     # -- scrolling ----------------------------------------------------------------
 
     def wheelEvent(self, event):  # noqa: N802
@@ -483,18 +554,35 @@ class CaptionCanvas(QWidget):
         event.accept()
 
     def scroll_by(self, dy):
-        self.target_scroll = min(max(0.0, self.target_scroll + dy), self.max_scroll())
-        at_bottom = self.target_scroll >= self.max_scroll() - 2
-        if self.following and not at_bottom:
-            self.following = False
+        """Scrolls `dy` px (up < 0) from where the captions are now. At the
+        live end that can be below the bottom-aligned position - the one-way
+        layout leaves space at the bottom (see _following_top) - so that's
+        where scrolling back starts from, not max_scroll()."""
+        if self._content_height() <= self.height():
+            # It all fits - nothing to scroll back to. (A caption that shrank
+            # may have left the oldest partly off the top: this brings it back.)
+            if self.following:
+                self._reanchor = True
+                self._layout()
+            return
+        current = self.target_scroll
+        target = min(max(0.0, current + dy), max(self.max_scroll(), self._scroll_hi if not self.following else current))
+        if self.following:
+            if target >= current - 0.5:
+                return  # already at the live end
+            self.following, self._scroll_hi = False, current
+            self.target_scroll = target
             if self.on_scrolled_back:
                 self.on_scrolled_back()
-        elif not self.following and at_bottom and self.on_back_at_bottom:
-            self.on_back_at_bottom()
+        else:
+            self.target_scroll = target
+            if dy > 0 and target >= self.max_scroll() - 2 and self.on_back_at_bottom:  # scrolled down to it
+                self.on_back_at_bottom()
+                return
         self._layout()
 
     def follow(self):
-        self.following = True
+        self.following, self._reanchor, self._scroll_hi = True, True, 0.0
         self._layout()
 
     # -- word lookup ----------------------------------------------------------------
@@ -728,12 +816,24 @@ class CaptionCanvas(QWidget):
                     for rect in self._word_rects(item, *marked[1:]):
                         p.drawRoundedRect(rect.adjusted(-3, 0, 3, 0), 5, 5)
             if item.old_pixmap is not None:
+                # Rows above cross_from as they are; the rest crossfades.
+                split = y + item.cross_from
+                p.save()
+                p.setClipRect(QRect(0, y - 8, self.width(), split - y + 8), Qt.ClipOperation.IntersectClip)
+                p.setOpacity(item.alpha)
+                p.drawPixmap(0, y, item.pixmap)
+                p.restore()
+                p.save()
+                p.setClipRect(QRect(0, split, self.width(), max(0, self.height() - split + 8)),
+                              Qt.ClipOperation.IntersectClip)
                 p.setOpacity(item.alpha * (1 - item.cross))
                 p.drawPixmap(0, y, item.old_pixmap)
                 p.setOpacity(item.alpha * item.cross)
+                p.drawPixmap(0, y, item.pixmap)
+                p.restore()
             else:
                 p.setOpacity(item.alpha)
-            p.drawPixmap(0, y, item.pixmap)
+                p.drawPixmap(0, y, item.pixmap)
         if cut_at_top:
             fade = QLinearGradient(0, 0, 0, self.FADE_EDGE)
             fade.setColorAt(0, QColor(0, 0, 0, 0))

@@ -812,6 +812,15 @@ class LanguagesPage(QWidget):
         self.preview = label("", "Faint", wrap=True)
         names.add(self.preview)
         content.addWidget(names)
+
+        skip = Card("Not captioned on their own", "Small acknowledgements and hesitations - a line that's "
+                                                  "only these isn't shown. A longer line starting with one "
+                                                  "(\u201c嗯，我觉得…\u201d) is. Separate them with commas.")
+        self.skip_words = QLineEdit(speech_options["skip_words"])
+        self.skip_words.setPlaceholderText("e.g. 嗯, 呃, mhm, uh-huh")
+        self.skip_words.editingFinished.connect(lambda: controller.set_skip_words(self.skip_words.text().strip()))
+        skip.add(self.skip_words)
+        content.addWidget(skip)
         content.addStretch(1)
 
         controller.targets_changed.connect(self._refresh_targets)

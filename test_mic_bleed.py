@@ -70,7 +70,7 @@ def main():
         print(f"OK: {name} -> {'bleed, dropped' if got else 'you, kept'}")
 
     # -- text backup and mixed languages, through process_segment ----------
-    translator.translate = lambda text, src, tgt: f"<{tgt}:{text}>"
+    translator.translate = lambda text, src, tgt, history=(): f"<{tgt}:{text}>"
     q = queue.Queue()
     process = translate_vc.make_process_segment(["en", "zh"], q)
 

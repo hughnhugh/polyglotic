@@ -39,6 +39,9 @@ DEFAULTS = {
     "language": None,       # None = auto-detect; else a code from CONVERSATION_LANGUAGES
     "context": "",          # names/slang passed to the speech model to bias its spelling
     "auto_names": True,     # also pass the Discord channel members' names (see overlay_core.speech_context)
+    # A caption made only of these (commas between) isn't shown - small acknowledgements and
+    # hesitations, said on their own (see translate_vc._only_skip_words)
+    "skip_words": "嗯, 嗯哼, 呃, 额, 对, 哦, 啊, 哎, ừ, ờ, mhm, mm, mm-hmm, hmm, uh-huh, um, uh",
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
     "translator": "Q4_K_M", # the translator's quantization - a key of translator.MODELS

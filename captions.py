@@ -43,6 +43,9 @@ class Caption:
     delay: "float | None"     # seconds from the end of the speech to this version appearing
     proc: "float | None"      # transcription + translation time alone
     langs: tuple = ()         # every language heard in it, main first - more than one when mixed
+    # The same, a clause at a time - the rows it's shown in (see clauses.py):
+    # ((native, translations), ...), joining up into native and translations
+    clauses: tuple = ()
     updated_at: float = field(default_factory=time.time)
     time: datetime = field(default_factory=datetime.now)
 
@@ -52,15 +55,14 @@ class Caption:
         that's all it needs) - and the yellow one under it: its translation
         into `target`, or, when it was already said in the target's
         language, into `second`; None when there's nothing to translate."""
-        text, is_translation = self.translations.get(target, (self.native, False))
-        if is_translation and text:
-            return self.native, text
-        said = text or self.native
-        if second and second != target:
-            text2, is_translation2 = self.translations.get(second, ("", False))
-            if is_translation2 and text2:
-                return said, text2
-        return said, None
+        return _lines(self.native, self.translations, target, second)
+
+    def clause_lines(self, target, second=None):
+        """[(said, translation, in_target)] - lines_for() a clause at a
+        time; in_target: whether that translation is into `target` (not
+        `second`)."""
+        return [(*_lines(native, translations, target, second), translations.get(target, ("", False))[1])
+                for native, translations in (self.clauses or ((self.native, self.translations),))]
 
     def text_for(self, target):
         """(primary, original): what to show in `target`'s view - the
@@ -68,6 +70,18 @@ class Caption:
         when it's already in that language (original then None)."""
         text, is_translation = self.translations.get(target, (self.native, False))
         return (text, self.native) if is_translation and text else (text or self.native, None)
+
+
+def _lines(native, translations, target, second):
+    text, is_translation = translations.get(target, (native, False))
+    if is_translation and text:
+        return native, text
+    said = text or native
+    if second and second != target:
+        text2, is_translation2 = translations.get(second, ("", False))
+        if is_translation2 and text2:
+            return said, text2
+    return said, None
 
 
 def join_text(pieces):
@@ -81,6 +95,12 @@ def join_text(pieces):
         cjk_join = out and "⺀" <= out[-1] <= "鿿" or "⺀" <= piece[0] <= "鿿"
         out += piece if not out or cjk_join else " " + piece
     return out
+
+
+def _clauses_of(record):
+    """A record's clauses - or the whole of it as one, from before they were
+    split (and in tests)."""
+    return record.get("clauses") or [{"native": record["native"], "translations": record.get("translations", {})}]
 
 
 class CaptionBoard:
@@ -106,7 +126,7 @@ class CaptionBoard:
             return
         group = record.get("group")
         if group and record.get("native") is None:
-            self._remove_groups([group])
+            self._remove_groups([group], record.get("reason", "duplicate of another speaker"))
         elif group and not record.get("final"):
             self._apply_live(group, record)
         else:
@@ -124,7 +144,7 @@ class CaptionBoard:
         joined = dict(record, native=join_text(p["native"] for p in parts), translations={
             t: (join_text(p["translations"].get(t, (p["native"], False))[0] for p in parts),
                 any(p["translations"].get(t, ("", False))[1] for p in parts))
-            for t in targets})
+            for t in targets}, clauses=[clause for p in parts for clause in _clauses_of(p)])
         self._live_counts[group] = self._live_counts.get(group, 0) + 1
         self._place(self._caption(joined, live=True), [group])
 
@@ -138,12 +158,14 @@ class CaptionBoard:
         self._place(caption, groups)
         self._write_log(caption, live_updates)
 
-    def _remove_groups(self, groups):
+    def _remove_groups(self, groups, reason):
         for g in groups:
             self._live_sections.pop(g, None)
             self._live_counts.pop(g, None)
-        self.captions = [c for c in self.captions if c.group not in groups]
-        self._write_log(f"[removed {', '.join(groups)} - duplicate of another speaker]")
+        kept = [c for c in self.captions if c.group not in groups]
+        if len(kept) < len(self.captions):  # logged only if it was showing
+            self._write_log(f"[removed {', '.join(groups)} - {reason}]")
+        self.captions = kept
 
     # -- helpers --------------------------------------------------------------
 
@@ -153,6 +175,7 @@ class CaptionBoard:
             key=next(self._keys), speaker=record.get("speaker", ""), is_you=record.get("you", False),
             lang=record.get("lang", ""), native=record["native"], translations=dict(record.get("translations", {})),
             group=record.get("group"), live=live, langs=tuple(record.get("langs") or ()),
+            clauses=tuple((c["native"], dict(c["translations"])) for c in _clauses_of(record)),
             delay=(time.time() - speech_end) if speech_end is not None else None, proc=record.get("proc"),
         )
 
