@@ -1,13 +1,14 @@
 """
-Text translation via Tencent's Hy-MT2-7B (a translation-tuned LLM), served
-by a local llama.cpp `llama-server` child process - both fetched into bin/
-and models/ by setup.ps1.
+Text translation via Tencent's Hy-MT2 (a translation-tuned LLM), served by
+a local llama.cpp `llama-server` child process - fetched into bin/ and
+models/ by setup.ps1, or dropped into models/ by hand.
 
-It comes in two quantizations (MODELS), picked on the Models page and
-switched while running (switch()): Q4_K_M, the default, which setup.ps1
-always fetches, and Q8_0 (setup.bat -Translator Q8_0), the closest to the
-unquantized model for 3.4GB more VRAM. (Q6_K was tried and dropped: on 640
-real captions it translated no better than Q4_K_M - eval/compare_translators.py.)
+Which model files there are is model_files.TRANSLATORS: Hy-MT2-1.8B Q8_0,
+the default - with Qwen3-ASR-0.6B it leaves an 8GB GPU room to spare - or
+Q4_K_M beside the larger Qwen3-ASR-1.7B; and the 7B, for bigger GPUs, if
+it's there. Picked on the Models page and switched while running
+(switch()). (For the 7B, Q6_K was tried and dropped: on 640 real captions
+it translated no better than Q4_K_M - eval/compare_translators.py.)
 
 Replaced NLLB-200 after a side-by-side on real captions from logs/ (see
 eval/compare_translators.py): far better on short, casual voice-chat lines
@@ -28,25 +29,25 @@ history) - a clause alone too often loses its subject or its sense.
 import atexit
 import json
 import os
+import re
 import subprocess
 import threading
 import time
 import urllib.error
 import urllib.request
 
+import model_files
 from child_process import free_port, kill_with_parent
 from lang_codes import CHINESE_CODES, TARGET_LANGUAGES
+from model_files import TRANSLATORS as MODELS
 from overlay_core import LOG_DIR, broadcast, status
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 LLAMA_SERVER = os.path.join(ROOT, "bin", "llama-server.exe")
-MODEL_NAME = "Hy-MT2-7B"
-# quantization -> (file in models/, its size in bytes - a partial download isn't the model)
-MODELS = {
-    "Q4_K_M": ("Hy-MT2-7B-Q4_K_M.gguf", 4624648896),
-    "Q8_0": ("HY-MT2-7B-Q8_0.gguf", 7981928896),
-}
-DEFAULT_MODEL = "Q4_K_M"
+DEFAULT_MODEL = "1.8B-Q8_0"
+# The prompt's own label, sometimes echoed at the start of the 1.8B's answer
+# ("[Source Text] Today it's too hot...") - taken off.
+_ECHOED_LABEL = re.compile(r"^\s*(?:\[Source Text\]|【待翻译文本】)\s*")
 
 CONTEXT_TOKENS = 2048        # one caption line plus prompt fits easily; keeps the KV cache (VRAM) small
 MAX_OUTPUT_TOKENS = 256
@@ -58,17 +59,11 @@ _proc = None
 _base_url = None
 _ready = threading.Event()
 _failed = threading.Event()
-model = DEFAULT_MODEL   # the quantization running (or loading)
+model = DEFAULT_MODEL   # the model running (or loading) - a key of MODELS
 _stop_registered = False
 
-
-def model_path(name):
-    return os.path.join(ROOT, "models", MODELS[name][0])
-
-
-def installed(name):
-    path = model_path(name)
-    return os.path.exists(path) and os.path.getsize(path) == MODELS[name][1]
+model_path = model_files.translator_path
+installed = model_files.translator_installed
 
 
 def running():
@@ -76,16 +71,16 @@ def running():
 
 
 def start(name=DEFAULT_MODEL):
-    """Launch the server with quantization `name` in the background -
-    returns immediately; the main window's "Translator" status tracks the
-    load. One that isn't downloaded falls back to the default."""
+    """Launch the server with model `name` (a key of MODELS) in the
+    background - returns immediately; the main window's "Translator" status
+    tracks the load. One that isn't in models/ falls back to one that is."""
     global _proc, _base_url, model, _stop_registered
 
     if name not in MODELS or not installed(name):
-        if name in MODELS and name != DEFAULT_MODEL:  # one no longer offered just quietly goes
-            broadcast(f"[Translator {MODEL_NAME} {name} isn't downloaded - using {DEFAULT_MODEL}. "
-                      f"Run setup.bat -Translator {name} to get it.]")
-        name = DEFAULT_MODEL
+        fallback = next((n for n in [DEFAULT_MODEL, *MODELS] if installed(n)), DEFAULT_MODEL)
+        if name in MODELS and fallback != name:  # one no longer offered just quietly goes
+            broadcast(f"[Translator {MODELS[name][1]} isn't in models\\ - using {MODELS[fallback][1]}.]")
+        name = fallback
     model = name
     _ready.clear()
     _failed.clear()
@@ -94,11 +89,11 @@ def start(name=DEFAULT_MODEL):
     if missing:
         status.set("translator", "Not installed - run setup.bat")
         broadcast(f"[Translation unavailable - missing {', '.join(os.path.relpath(p, ROOT) for p in missing)}; "
-                  "run setup.bat. Showing transcriptions only.]")
+                  "run setup.bat, or put the model in models\\. Showing transcriptions only.]")
         _failed.set()
         return
 
-    label = f"{MODEL_NAME} {name}"
+    label = MODELS[name][1]
     status.set("translator", f"Loading {label}...")
     port = free_port()
     _base_url = f"http://127.0.0.1:{port}"
@@ -154,7 +149,7 @@ def stop():
 
 
 def switch(name):
-    """Restarts the server with quantization `name`. Translations pause
+    """Restarts the server with model `name`. Translations pause
     while it loads (translate() waits for it) - a few seconds. Blocks while
     the old one shuts down, so call from a worker thread."""
     _ready.clear()  # translate() waits for the new one rather than asking the old
@@ -214,4 +209,4 @@ def translate(text, src_lang, target, history=()):
     except (urllib.error.URLError, OSError, ValueError) as e:
         print(f"[translator] request failed: {e}")
         return ""
-    return (reply["choices"][0]["message"].get("content") or "").strip()
+    return _ECHOED_LABEL.sub("", reply["choices"][0]["message"].get("content") or "").strip()

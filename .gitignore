@@ -4,7 +4,8 @@ __pycache__/
 *.log
 logs/
 bin/
-models/
+models/*
+!models/README.md
 eval/results/
 venv-qwen-asr/
 settings.json

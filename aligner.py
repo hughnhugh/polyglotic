@@ -45,7 +45,7 @@ def _status(text):
 def show_status():
     """Sets the status to what the model's doing now."""
     if not installed():
-        _status("Not installed - run setup.bat -WordLinks")
+        _status("Not installed - run setup.bat")
     elif _model is not None:
         _status(f"Ready (on the {_device.upper()})")
     elif _loading.is_set():

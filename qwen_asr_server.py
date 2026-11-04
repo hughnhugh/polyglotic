@@ -1,12 +1,10 @@
 """
-Qwen3-ASR transcription server - run by qwen_asr_client.py inside its own
-venv (venv-qwen-asr/, created by setup.ps1), never imported by the app.
+Qwen3-ASR transcription server - run by qwen_asr_client.py as a child
+process (with the app's venv, or an older install's venv-qwen-asr/), never
+imported by the app: in a process of its own, its GPU memory is all let go
+of when it stops, and it's reached over localhost.
 
-The qwen-asr package pins transformers 4.x and an older huggingface_hub,
-which conflict with the main venv's faster-whisper stack, so it lives in a
-separate environment and is reached over localhost instead.
-
-    venv-qwen-asr\\Scripts\\python.exe qwen_asr_server.py MODEL_DIR PORT
+    venv\\Scripts\\python.exe qwen_asr_server.py MODEL_DIR PORT
 
 POST /transcribe[?language=Vietnamese&context=...]
                   body: little-endian float32 PCM, 16kHz mono

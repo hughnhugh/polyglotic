@@ -2,6 +2,6 @@
 REM Double-click wrapper for setup.ps1 - runs it with the execution-policy
 REM restriction bypassed for just this one script, without changing your
 REM system's PowerShell policy permanently. Arguments are passed through,
-REM e.g. "setup.bat -QwenASR".
+REM e.g. "setup.bat -ModelsFrom D:\vc-translator-models".
 powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" %*
 pause

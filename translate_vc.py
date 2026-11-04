@@ -20,12 +20,20 @@ per target.
 
 import argparse
 import difflib
+import os
 import re
+import sys
 import time
 import unicodedata
 from collections import OrderedDict, deque
 
-from opencc import OpenCC
+if sys.stdout is None:  # started without a console (pythonw - the Start Menu shortcut, start.bat)
+    _logs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+    os.makedirs(_logs, exist_ok=True)
+    # what it prints goes here instead - and libraries that write to stderr (torch.hub) don't crash
+    sys.stdout = sys.stderr = open(os.path.join(_logs, "app.log"), "w", encoding="utf-8", buffering=1)
+
+from opencc import OpenCC  # noqa: E402 - after the console check above
 
 import aligner
 import clauses
@@ -551,8 +559,8 @@ def main():
     )
     parser.add_argument(
         "--model", "-m", default=None,
-        help="Speech model: qwen3-asr-1.7b / qwen3-asr-0.6b, or a Whisper size "
-             "(default: qwen3-asr-1.7b if installed, else large-v3)",
+        help="Speech model: qwen3-asr-0.6b / qwen3-asr-1.7b, or a Whisper size "
+             "(default: the Qwen3-ASR in models/ - 1.7B if it's there, else 0.6B - else large-v3)",
     )
     parser.add_argument("--no-mic", action="store_true", help="Don't also capture your microphone")
     parser.add_argument(

@@ -5,9 +5,11 @@ selectable from Settings' speech-model dropdown ("qwen3-asr-1.7b" /
 dialects per Qwen's own benchmarks, and it detects all of its 30 languages
 plus Cantonese itself (Whisper reports Cantonese speech as "zh").
 
-The model runs in a child process (qwen_asr_server.py) inside its own venv,
-venv-qwen-asr/ - its qwen-asr package pins dependency versions that clash
-with faster-whisper's, so it can't share the app's venv.
+The model runs in a child process (qwen_asr_server.py) - its own process,
+so its GPU memory is all let go of when it stops - with the app's own
+Python (venv/): the qwen-asr package's pins (transformers 4.57, an older
+huggingface_hub) suit faster-whisper too. An install from before that,
+with qwen-asr in a venv of its own (venv-qwen-asr/), still uses that.
 
 Known gap vs Whisper: Qwen3-ASR exposes no per-segment confidence
 (no_speech_prob / avg_logprob / language probability), so the app's
@@ -26,17 +28,16 @@ from types import SimpleNamespace
 
 import numpy as np
 
+import model_files
 from child_process import free_port, kill_with_parent
 from overlay_core import LOG_DIR
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-PYTHON = os.path.join(ROOT, "venv-qwen-asr", "Scripts", "python.exe")
+_OWN_VENV = os.path.join(ROOT, "venv-qwen-asr", "Scripts", "python.exe")
+PYTHON = _OWN_VENV if os.path.exists(_OWN_VENV) else os.path.join(ROOT, "venv", "Scripts", "python.exe")
 SERVER_SCRIPT = os.path.join(ROOT, "qwen_asr_server.py")
 
-MODEL_DIRS = {
-    "qwen3-asr-1.7b": os.path.join(ROOT, "models", "Qwen3-ASR-1.7B"),
-    "qwen3-asr-0.6b": os.path.join(ROOT, "models", "Qwen3-ASR-0.6B"),
-}
+MODEL_DIRS = {name: model_files.speech_dir(name) for name in model_files.SPEECH}
 
 LOAD_TIMEOUT_SEC = 300
 REQUEST_TIMEOUT_SEC = 60
@@ -68,10 +69,9 @@ class QwenASRModel:
 
     def __init__(self, size):
         model_dir = MODEL_DIRS[size]
-        missing = [p for p in (PYTHON, model_dir) if not os.path.exists(p)]
-        if missing:
-            raise FileNotFoundError(f"missing {', '.join(os.path.relpath(p, ROOT) for p in missing)} - "
-                                    "run setup.ps1 with -QwenASR")
+        if not os.path.exists(PYTHON) or not model_files.speech_installed(size):
+            raise FileNotFoundError(f"{os.path.relpath(model_dir, ROOT)} or the app's venv is missing - "
+                                    "run setup.bat, or put the model's folder in models\\")
         port = free_port()
         self._url = f"http://127.0.0.1:{port}"
         os.makedirs(LOG_DIR, exist_ok=True)

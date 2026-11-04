@@ -3,9 +3,13 @@
 Live translator for Discord (or any Windows system audio). Captures your PC's
 audio output via WASAPI loopback plus your microphone, detects speech with
 Silero VAD (or Discord's own speaking events), transcribes it with
-Qwen3-ASR or Whisper, and translates it into the languages of your choosing with Hy-MT2-7B, a translation-tuned LLM
-served by a local llama.cpp server — all running locally on your GPU, no
-cloud APIs.
+Qwen3-ASR, and translates it into the languages of your choosing with Hy-MT2,
+a translation-tuned LLM served by a local llama.cpp server - all running
+locally on your GPU, no cloud APIs.
+
+**This branch (`feature/8gb-stack`) is sized for an 8GB GPU, like an RTX
+4060 Ti:** Qwen3-ASR-0.6B for speech and Hy-MT2-1.8B for translation, about
+4.2GB of GPU memory in all - and setup is one double-click.
 
 Captions appear as subtitles over your game or video - the translation,
 the original underneath, and who said it - one overlay per language you
@@ -22,67 +26,66 @@ and (optionally) have a small local LLM explain it in context. See
 
 ## Requirements
 
-- **Windows 10/11.** This uses WASAPI loopback audio capture and Win32-specific
-  packages - it will not run on macOS/Linux.
-- **An NVIDIA GPU with CUDA support, and a recent driver (580 or newer -
-  CUDA 13).** Whisper and the translation model are heavy - this isn't
-  optional, there's no CPU fallback mode. **12GB+ VRAM recommended**: the
-  translator takes ~5GB and Whisper `large-v3` ~4GB, plus whatever else
-  (games, browser, Discord) is using the GPU. Smaller Whisper models (see
-  Options below) free up some of that.
-- **Python 3.12.** Get it from [python.org/downloads](https://www.python.org/downloads/)
-  - during install, check **"Add python.exe to PATH"**, and check
-  **"py launcher"** (on by default) - both are just checkboxes on the first
-  install screen.
-- **~15GB free disk space** - dependencies (~4-5GB, mostly PyTorch+CUDA), the
-  translator (~5GB, downloaded by setup) and the Whisper/VAD models downloaded
-  on first run (~3GB - see Notes below).
-- **Internet connection** for setup and for the one-time Whisper download on
-  first launch. Not needed after that.
+- **Windows 10/11.**
+- **An NVIDIA GPU with 8GB or more, and a recent driver (580 or newer - CUDA
+  13)** - from [nvidia.com/drivers](https://www.nvidia.com/download/index.aspx).
+- **~12GB free disk space** - Python packages (~6GB, mostly PyTorch and
+  CUDA) and the models (~5GB).
+- **Internet** for setup - unless you copy the models in (below). Not needed
+  after that.
+
+That's all: setup gets its own Python 3.12 if you don't have it.
 
 ## Setup
 
-**Option A - automated (recommended):** double-click **`setup.bat`** in this
-folder. It finds your Python install, creates the project's virtual
-environment (`venv\`), installs everything, and downloads the translator - a
-prebuilt llama.cpp server into `bin\` and the Hy-MT2-7B model (4.6GB) into
-`models\` - and the CC-CEDICT and Vietnamese dictionaries and word frequencies
-for word lookups (22MB, into `data\`),
-printing clear errors if something's missing (e.g. no Python
-found, or no NVIDIA GPU detected). Safe to re-run any time - it reuses an
-existing `venv\` and existing downloads rather than redoing them, so
-re-running after a `git pull` just catches up on anything new, and
-re-running after an interrupted model download resumes it.
+Double-click **`setup.bat`**. It:
 
-If Windows won't run `setup.ps1` directly (only relevant if you run the
-`.ps1` yourself instead of double-clicking `setup.bat`), that's PowerShell's
-script-execution policy blocking it by default - `setup.bat` already works
-around this for you by invoking it with the restriction bypassed for just
-that one run, without changing any system-wide setting.
+- gets Python 3.12 if it isn't installed, and installs every package into
+  one environment (`venv\`) - through [uv](https://docs.astral.sh/uv/), a
+  fast installer it fetches into `bin\`;
+- downloads the llama.cpp server (`bin\`) and the models (`models\`):
+  Qwen3-ASR-0.6B (2.0GB), Hy-MT2-1.8B Q8_0 (1.9GB) and awesome-align for
+  word links (1.1GB, runs on the CPU);
+- downloads the word-lookup dictionaries (22MB, `data\`) and the speech
+  detector, Silero VAD;
+- adds **vc-translator** to the Start Menu.
 
-**Option B - manual**, if you'd rather see/control each step:
+Safe to re-run: what's already there is kept, and an interrupted download
+picks up where it stopped.
 
-```powershell
-python -m venv venv
-.\venv\Scripts\python.exe -m pip install --upgrade pip
-.\venv\Scripts\python.exe -m pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-.\venv\Scripts\python.exe -m pip install faster-whisper PyAudioWPatch numpy opencc-python-reimplemented websockets PySide6
-.\venv\Scripts\python.exe -m pip install nvidia-ml-py
+### Already have the models?
+
+Copy them into `models\` before running setup - `models\README.md` lists
+the names and folders - and setup uses them instead of downloading. Or
+point setup at a folder laid out the same way, like another install's
+`models\` or a USB drive:
+
+```
+setup.bat -ModelsFrom E:\vc-translator-models
 ```
 
-Then the translator: unzip llama.cpp's
-`llama-b11796-bin-win-cuda-13.4-x64.zip` and
-`cudart-llama-bin-win-cuda-13.4-x64.zip` from its
-[releases page](https://github.com/ggml-org/llama.cpp/releases/tag/b11796)
-into `bin\`, and download
-[`Hy-MT2-7B-Q4_K_M.gguf`](https://huggingface.co/tencent/Hy-MT2-7B-GGUF) into
-`models\`.
+The app finds models by name; there's nothing else to wire up. A model
+dropped in later shows up on the Models page the next time the app starts.
 
-`nvidia-ml-py` (the last line) is optional (Home's GPU memory readout
-only) - queries the driver directly via NVML so it reflects everything using
-VRAM, every model included. Without it, the readout shows as unavailable.
+### GPU memory
+
+| | Speech | Translation | GPU memory |
+|---|---|---|---|
+| Default | Qwen3-ASR-0.6B (2.0GB) | Hy-MT2-1.8B Q8_0 (2.2GB) | 4.2GB - room to spare on 8GB |
+| `setup.bat -LargerSpeechModel` | Qwen3-ASR-1.7B (4.7GB) | Hy-MT2-1.8B Q4_K_M (1.5GB) | 6.2GB - better on Cantonese, tight on 8GB |
+
+Measured on 2026-11-04 while transcribing and translating; word links and
+speech detection run on the CPU and take none.
+
+Windows, your browser and Discord use some GPU memory too, so on an 8GB
+card the default is the safe choice. The local assistant (the side chat and
+Explain - `setup.bat -Assistant`, ~3GB more) needs a 12GB+ GPU.
 
 ## Run
+
+Start **vc-translator** from the Start Menu, or double-click `start.bat`.
+Either runs it without a console window - what it prints goes to
+`logs\app.log`. To watch that live instead:
 
 ```powershell
 .\venv\Scripts\python.exe translate_vc.py
@@ -262,9 +265,9 @@ Anything left out comes from the last run.
   colloquial Cantonese ones (嘅、咗、唔、佢、喺...), as is Cantonese speech
   itself. Speech in any language the speech model recognizes can be
   translated *from*; only the target is limited to this list.
-- `--model SIZE` - speech model: `qwen3-asr-1.7b` / `qwen3-asr-0.6b` (see
-  below) or a Whisper size (first run: `qwen3-asr-1.7b` if it's installed,
-  else `large-v3`).
+- `--model SIZE` - speech model: `qwen3-asr-0.6b` / `qwen3-asr-1.7b` (see
+  below) or a Whisper size (first run: the Qwen3-ASR in `models\` - the
+  1.7B if it's there, else the 0.6B).
 - `--no-mic` - don't capture your microphone.
 - `--discord-bridge-port PORT` - the Discord plugin's port (default 8765).
 
@@ -366,8 +369,7 @@ The links come from awesome-align, a multilingual BERT model fine-tuned to
 align words between a sentence and its translation (Chinese-English among
 the pairs it was built for). It runs on the CPU, about 30ms a line, so it
 needs no GPU memory, and loads in a few seconds the first time word links
-are switched on. Setup is opt-in: `setup.bat -WordLinks` installs the
-`transformers` package and downloads the model (1.1GB, into `models\`).
+are switched on. Setup downloads the model (1.1GB, into `models\`).
 Design notes and how it was evaluated: `docs/word-links.md`.
 
 ## The local assistant (optional)
@@ -398,8 +400,8 @@ It's a separate server from the translator's on purpose: that one handles
 one request at a time, so an explanation or a chat there would hold up live
 captions. Answers start streaming within about a second.
 
-Setup is opt-in - run `setup.bat -Assistant` to download the model (2.7GB),
-then open the side chat or click Explain in a lookup - or switch on
+Setup is opt-in, and it needs a 12GB+ GPU beside the speech and translation
+models - run `setup.bat -Assistant` to download the model (2.7GB), then open the side chat or click Explain in a lookup - or switch on
 **Local assistant** on the Models page to keep it on. It uses ~3GB of VRAM
 only while switched on: closing the side chat or the lookup that switched
 it on, or that switch, frees it. Its log goes to
@@ -407,29 +409,29 @@ it on, or that switch, frees it. Its log goes to
 words and lines, shakier on the details of a long conversation (who said
 what to whom) - treat it as a helpful guess, not gospel.
 
-## Translator quality (optional)
+## Translator models
 
-The translator, Hy-MT2-7B, comes compressed (quantized) to two sizes,
-picked from the dropdown on the Models page - switching takes a few
-seconds, during which translations pause:
+Hy-MT2 comes in two sizes, each compressed (quantized) more or less, picked
+from the dropdown on the Models page - switching takes a few seconds,
+during which translations pause:
 
-| | Download / VRAM | |
+| | Download | |
 |---|---|---|
-| `Q4_K_M` (default) | ~4.6GB | the most compressed - always installed |
-| `Q8_0` | ~8.0GB | the closest to uncompressed |
+| `Hy-MT2-1.8B Q8_0` (default) | 1.9GB | nearly uncompressed - beside Qwen3-ASR 0.6B on 8GB |
+| `Hy-MT2-1.8B Q4_K_M` | 1.1GB | more compressed - beside Qwen3-ASR 1.7B on 8GB (`-LargerSpeechModel`) |
+| `Hy-MT2-7B Q4_K_M` / `Q8_0` | 4.6 / 8.0GB | the larger model, for 12GB+ GPUs - listed once its file is in `models\` |
 
-`Q8_0` is opt-in: `setup.bat -Translator Q8_0`. If it isn't downloaded the
-dropdown says so, and the app falls back to `Q4_K_M` if it goes missing.
-Don't expect much from it: `Q6_K`, nearly as close to uncompressed, was
-compared with `Q4_K_M` on 640 real captions (`eval/compare_translators.py`)
-and translated no better - about half the lines came out word for word the
-same, and the rest split evenly.
+One that's missing falls back to one that's there. The 1.8B hasn't been
+compared with the 7B on real captions yet; `eval/compare_translators.py`
+has it as `hymt2-1.8b`. (For the 7B, `Q6_K` was compared with `Q4_K_M` on
+640 real captions and translated no better.)
 
-## Qwen3-ASR speech model (optional)
+## Speech models
 
-An alternative to Whisper for transcription, picked on the main window's
-Models page (`qwen3-asr-1.7b` or `qwen3-asr-0.6b`), and the default once
-installed. Alibaba's
+Qwen3-ASR does the transcription - the 0.6B by default, the 1.7B with
+`setup.bat -LargerSpeechModel` - picked on the main window's Models page,
+where Whisper is offered too (downloaded the first time it's picked,
+~3GB for `large-v3`). Alibaba's
 Qwen3-ASR is much stronger than Whisper on Cantonese and other Chinese
 dialects (by Qwen's own benchmarks - roughly half Whisper's error rate on
 Cantonese, far less on conversational Cantonese), and reports Cantonese as
@@ -437,11 +439,9 @@ its own language instead of lumping it in with Mandarin. It also stays
 silent on silence and background noise, where Whisper tends to invent
 text that the app then has to filter out.
 
-Setup is opt-in, since it's ~9GB more on disk - run `setup.bat -QwenASR`.
-It needs its own Python environment (`venv-qwen-asr\`): the `qwen-asr`
-package pins library versions that conflict with faster-whisper's. The
-app runs it as a separate background process, started when you pick it
-and stopped when you switch back.
+The app runs it as a separate background process, with its own Python
+environment's interpreter, started when you pick it and stopped when you
+switch away - so its GPU memory is all given back.
 
 Trade-offs, measured on this setup:
 
@@ -449,7 +449,7 @@ Trade-offs, measured on this setup:
 |---|---|---|
 | Whisper `large-v3` | ~4.0GB | ~0.4s |
 | `qwen3-asr-0.6b` | ~2.0GB | ~0.5s |
-| `qwen3-asr-1.7b` | ~4.9GB | ~0.5s |
+| `qwen3-asr-1.7b` | ~4.7GB | ~0.5s |
 
 Whisper's confidence scores, which the app uses to catch made-up text, don't
 exist for Qwen3-ASR - it relies on the VAD gate and Qwen's own "no speech"
@@ -503,10 +503,9 @@ captions:
 
 ## Notes
 
-- First run downloads the Silero VAD model and the Whisper model (~3GB for
-  `large-v3`). The translation model is downloaded by setup instead (see
-  Setup above).
-- Whisper transcribes the native speech, then Hy-MT2-7B translates that text
+- Setup fetches the models and Silero VAD; a Whisper model downloads the
+  first time it's picked (~3GB for `large-v3`).
+- The speech model transcribes the native speech, then Hy-MT2 translates that text
   into each target language - English included. It runs in a separate
   `llama-server` process the app starts and stops itself (also killed
   automatically if the app crashes, so it can't leave VRAM tied up); its
@@ -523,9 +522,9 @@ captions:
 
 ## Troubleshooting
 
-- **"No Python install found" from `setup.bat`/`setup.ps1`.** Install Python
-  3.12 from [python.org/downloads](https://www.python.org/downloads/),
-  checking "Add python.exe to PATH" during install, then re-run.
+- **Setup stops at "Creating venv".** uv couldn't get Python 3.12 - check
+  the internet connection and re-run, or install Python 3.12 from
+  [python.org/downloads](https://www.python.org/downloads/) and re-run.
 - **"'nvidia-smi' not found" warning during setup.** Means either there's no
   NVIDIA GPU, or its driver isn't installed - install the latest driver from
   [nvidia.com/drivers](https://www.nvidia.com/download/index.aspx). The app
@@ -534,16 +533,14 @@ captions:
   on this system"). Use `setup.bat` instead - it invokes the `.ps1` with the
   restriction bypassed for just that one run. (Or manually:
   `powershell -ExecutionPolicy Bypass -File setup.ps1`.)
-- **First launch seems stuck / slow.** It's downloading the Whisper and VAD
-  models (~3GB total, one-time) - Home's Status panel shows "Loading..."
-  per component. A slow/metered connection
-  can make this take several minutes.
+- **The app won't start from the Start Menu.** See `logs\app.log` - or
+  run `.\venv\Scripts\python.exe translate_vc.py` to see what it says.
 - **Captions show only the original text, no translation.** Check the
   Translator row on Home (or the Models page). "Not installed" means
   `bin\` or `models\` is missing - re-run `setup.bat`. "Failed" means the
   server didn't start - see `logs/llama-server.log`; the usual causes are an
   NVIDIA driver too old for CUDA 13, or not enough free VRAM (close other
-  GPU-heavy apps, or pick a smaller Whisper model).
+  GPU-heavy apps, or pick the smaller models on the Models page).
 - **Symlink warning from `huggingface_hub` on first run.** Harmless - Windows
   needs Developer Mode or admin rights for symlinks; without them, model
   files are just copied instead, using a bit more disk space.

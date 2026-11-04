@@ -13,16 +13,16 @@ import json
 import os
 import threading
 
+import model_files
+
 ROOT = os.path.dirname(os.path.abspath(__file__))
 PATH = os.path.join(ROOT, "settings.json")
 
 
 def _default_model():
-    # Qwen3-ASR when setup.ps1 -QwenASR installed it - stronger than
-    # Whisper on Chinese/Cantonese and with far fewer invented captions.
-    installed = (os.path.exists(os.path.join(ROOT, "venv-qwen-asr", "Scripts", "python.exe"))
-                 and os.path.isdir(os.path.join(ROOT, "models", "Qwen3-ASR-1.7B")))
-    return "qwen3-asr-1.7b" if installed else "large-v3"
+    # Qwen3-ASR when it's in models/ - stronger than Whisper on
+    # Chinese/Cantonese and with far fewer invented captions.
+    return model_files.default_speech_model()
 
 
 DEFAULTS = {
@@ -44,7 +44,7 @@ DEFAULTS = {
     "skip_words": "嗯, 嗯哼, 呃, 额, 对, 哦, 啊, 哎, ừ, ờ, mhm, mm, mm-hmm, hmm, uh-huh, um, uh",
     "live_interval": 1.5,   # seconds between live caption updates; None = off (see overlay_core.live_options)
     "translate_live": True, # translate live updates too, not just each pause's final caption
-    "translator": "Q4_K_M", # the translator's quantization - a key of translator.MODELS
+    "translator": None,     # a key of model_files.TRANSLATORS; filled in by load() - the one that fits beside the speech model
     "assistant": False,     # the local assistant model running (assistant.py): Explain, side chat - ~3GB VRAM
     "chat_context": True,   # the side chat gives the model the conversation so far
     "chat_geometry": None,  # the side chat's [x, y, width, height], once opened
@@ -101,6 +101,8 @@ def load():
                 values[k] = dict(DEFAULTS[k], **v) if isinstance(DEFAULTS[k], dict) and isinstance(v, dict) else v
         except (OSError, ValueError):
             pass
+        if values["translator"] not in model_files.TRANSLATORS:  # unset, or a choice from before the 1.8B
+            values["translator"] = model_files.default_translator(values["model"])
         _values = values
         return dict(values)
 
@@ -113,6 +115,7 @@ def update(**changes):
         if _values is None:
             _values = json.loads(json.dumps(DEFAULTS))
             _values["model"] = _default_model()
+            _values["translator"] = model_files.default_translator(_values["model"])
         _values.update(changes)
         tmp = PATH + ".tmp"
         try:

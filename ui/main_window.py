@@ -29,7 +29,8 @@ import translator
 from captions import Caption
 from lang_codes import LANGUAGE_NAMES
 from overlay_core import live_options, speech_context, speech_options
-from qwen_asr_client import MODEL_DIRS, PYTHON as QWEN_PYTHON
+import model_files
+from qwen_asr_client import PYTHON as QWEN_PYTHON
 from ui import theme
 from ui.app import gpu_memory
 from ui.lookup import HANZI_FAMILIES, Context, context_for
@@ -40,20 +41,22 @@ from ui.widgets import (Card, Chip, FlowRow, Segmented, SettingRow, StatusDot, T
 PINNED_LANGUAGES = ["en", "zh", "zh-hant", "yue", "vi"]
 
 MODEL_CHOICES = [
-    ("qwen3-asr-1.7b", "Qwen3-ASR 1.7B", "Most accurate - especially Chinese, Cantonese and Vietnamese. Recommended.",
-     "4.7 GB"),
-    ("qwen3-asr-0.6b", "Qwen3-ASR 0.6B", "Nearly as good at under half the memory - when a game needs the GPU.",
-     "2 GB"),
+    ("qwen3-asr-0.6b", "Qwen3-ASR 0.6B", "Recommended for an 8 GB GPU: strong on Chinese, Cantonese and "
+     "Vietnamese, with room to spare beside the Q8_0 translator.", "2 GB"),
+    ("qwen3-asr-1.7b", "Qwen3-ASR 1.7B", "Most accurate, especially on Cantonese. On an 8 GB GPU, pair it with the "
+     "Q4_K_M translator - it's tight.", "4.7 GB"),
     ("large-v3", "Whisper large-v3", "OpenAI's model. Weaker on Cantonese, and invents text on noise more often.",
      "4 GB"),
     ("small", "Whisper small", "Lightest option, noticeably less accurate.", "1 GB"),
 ]
 
-# The translator's quantizations (translator.MODELS): (name, label, what it's for)
-TRANSLATOR_CHOICES = [
-    ("Q4_K_M", "Hy-MT2-7B Q4_K_M (default)", "The most compressed - the least GPU memory."),
-    ("Q8_0", "Hy-MT2-7B Q8_0", "The closest to the uncompressed model, for about 3.4 GB more than Q4_K_M."),
-]
+# The translators (model_files.TRANSLATORS): (name, what it's for)
+TRANSLATOR_NOTES = {
+    "1.8B-Q8_0": "The default for an 8 GB GPU - nearly uncompressed, beside Qwen3-ASR 0.6B.",
+    "1.8B-Q4_K_M": "More compressed - the one to pair with Qwen3-ASR 1.7B on an 8 GB GPU.",
+    "7B-Q4_K_M": "The larger model, for GPUs with 12 GB or more.",
+    "7B-Q8_0": "The larger model, nearly uncompressed - 16 GB GPUs.",
+}
 
 FADE_CHOICES = [(None, "Never"), (5, "5s"), (8, "8s"), (15, "15s"), (30, "30s")]
 LIVE_CHOICES = [None, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6]
@@ -85,7 +88,7 @@ def _status_of(key, text):
 
 def _qwen_installed(size):
     import os
-    return os.path.exists(QWEN_PYTHON) and os.path.isdir(MODEL_DIRS[size])
+    return os.path.exists(QWEN_PYTHON) and model_files.speech_installed(size)
 
 
 def _page(title, subtitle):
@@ -1055,7 +1058,7 @@ class CaptionsPage(QWidget):
         self.word_links.setEnabled(aligner.installed())
         self.link_detail.setEnabled(aligner.installed() and on)
         if not aligner.installed():
-            text = "Needs the word-alignment model: run setup.bat -WordLinks (a 1.1 GB download)."
+            text = "Needs the word-alignment model: run setup.bat (a 1.1 GB download)."
         elif aligner.error:
             text = f"The word-alignment model didn't load: {aligner.error}"
         elif on and aligner.loading():
@@ -1239,7 +1242,8 @@ class _ModelOption(QPushButton):
         text.setSpacing(2)
         name = label(title)
         name.setStyleSheet("font-weight: 600; background: transparent;")
-        desc = label(description if available else "Not installed - run setup.bat -QwenASR", "Faint", wrap=True)
+        desc = label(description if available else "Not installed - put its folder in models\\, or run setup.bat "
+                     "(-LargerSpeechModel for the 1.7B)", "Faint", wrap=True)
         desc.setStyleSheet("background: transparent;")
         text.addWidget(name)
         text.addWidget(desc)
@@ -1282,23 +1286,25 @@ class ModelsPage(QWidget):
         speech.add(self.model_line)
         content.addWidget(speech)
 
-        translation = Card("Translation", "Hy-MT2-7B by Tencent - a translation model tuned for casual speech. "
+        translation = Card("Translation", "Hy-MT2 by Tencent - a translation model tuned for casual speech. "
                                           "Translates into every chosen language.")
         self.translator_choice = QComboBox()
         self.translator_choice.setMinimumWidth(280)
-        for name, title, note in TRANSLATOR_CHOICES:
+        for name, (file, title, size) in model_files.TRANSLATORS.items():
             available = translator.installed(name)
-            size = translator.MODELS[name][1] / 1e9
+            if not available and name.startswith("7B"):
+                continue  # for bigger GPUs - listed only once dropped into models\
             self.translator_choice.addItem(f"{title}  ·  {size:.1f} GB" + ("" if available else "  ·  not downloaded"),
                                            name)
             item = self.translator_choice.model().item(self.translator_choice.count() - 1)
             item.setEnabled(available)
-            item.setToolTip(note if available else f"Run setup.bat -Translator {name} to download it ({size:.1f} GB).")
+            item.setToolTip(TRANSLATOR_NOTES[name] if available else
+                            f"Put {file} in the models folder, or run setup.bat ({size:.1f} GB).")
         self.translator_choice.activated.connect(
             lambda _: controller.set_translator(self.translator_choice.currentData()))
-        translation.add(SettingRow("Model", "The same translator, less compressed: larger is a little more "
-                                   "accurate with nuance and slang, and takes more GPU memory. Switching takes a few "
-                                   "seconds, during which translations pause.", self.translator_choice))
+        translation.add(SettingRow("Model", "Less compressed is a little more accurate with nuance and slang, and "
+                                   "takes more GPU memory. Switching takes a few seconds, during which "
+                                   "translations pause.", self.translator_choice))
         self.translator_line = _StatusLine("Status")
         translation.add(self.translator_line)
         content.addWidget(translation)
@@ -1324,7 +1330,7 @@ class ModelsPage(QWidget):
                                        "pot\u201d. Behind word links: switch them on from the Captions page.")
         links.add(label("Runs on the CPU - no GPU memory - and holds ~1.2 GB of memory while word links are "
                         "on." if aligner.installed() else
-                        "Not installed - run setup.bat -WordLinks (1.1 GB).", "Dim", wrap=True))
+                        "Not installed - run setup.bat (1.1 GB).", "Dim", wrap=True))
         self.aligner_line = _StatusLine("Status")
         links.add(self.aligner_line)
         content.addWidget(links)
